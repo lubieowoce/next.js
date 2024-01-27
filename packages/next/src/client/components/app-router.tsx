@@ -416,6 +416,12 @@ function Router({
         return
       }
 
+      // If restoring from a MPA navigation, globalMutable.pendingMpaPath might be set to
+      // the URL we navigated to. This breaks future navigations to that URL, so we need to clear it
+      if (globalMutable.pendingMpaPath) {
+        globalMutable.pendingMpaPath = undefined
+      }
+
       dispatch({
         type: ACTION_RESTORE,
         url: new URL(window.location.href),
