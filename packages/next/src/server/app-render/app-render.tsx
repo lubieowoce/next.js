@@ -774,6 +774,13 @@ async function renderToHTMLOrFlightImpl(
     serverActionsManifest,
     pageName: renderOpts.page,
   })
+  console.log(
+    `rendertoHTMLOrFlightImpl (page: ${renderOpts.page}) :: serverActionsManifest`,
+    require('util').inspect(serverActionsManifest, {
+      depth: undefined,
+      colors: true,
+    })
+  )
 
   setReferenceManifestsSingleton({
     clientReferenceManifest,

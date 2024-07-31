@@ -1,6 +1,7 @@
 import type { ActionManifest } from '../../build/webpack/plugins/flight-client-entry-plugin'
 import type { ClientReferenceManifest } from '../../build/webpack/plugins/flight-manifest-plugin'
 import type { DeepReadonly } from '../../shared/lib/deep-readonly'
+import type { ServerModuleMap } from './action-utils'
 
 // Keep the key in memory as it should never change during the lifetime of the server in
 // both development and production.
@@ -119,13 +120,7 @@ export function setReferenceManifestsSingleton({
 }: {
   clientReferenceManifest: DeepReadonly<ClientReferenceManifest>
   serverActionsManifest: DeepReadonly<ActionManifest>
-  serverModuleMap: {
-    [id: string]: {
-      id: string
-      chunks: string[]
-      name: string
-    }
-  }
+  serverModuleMap: ServerModuleMap
 }) {
   // @ts-ignore
   globalThis[SERVER_ACTION_MANIFESTS_SINGLETON] = {

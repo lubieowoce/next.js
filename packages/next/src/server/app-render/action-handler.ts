@@ -39,7 +39,7 @@ import { warn } from '../../build/output/log'
 import { RequestCookies, ResponseCookies } from '../web/spec-extension/cookies'
 import { HeadersAdapter } from '../web/spec-extension/adapters/headers'
 import { fromNodeOutgoingHttpHeaders } from '../web/utils'
-import { selectWorkerForForwarding } from './action-utils'
+import { selectWorkerForForwarding, type ServerModuleMap } from './action-utils'
 import { isNodeNextRequest, isWebNextRequest } from '../base-http/helpers'
 
 function formDataFromSearchQueryString(query: string) {
@@ -385,16 +385,6 @@ function limitUntrustedHeaderValueForLogs(value: string) {
   return value.length > 100 ? value.slice(0, 100) + '...' : value
 }
 
-type ServerModuleMap = Record<
-  string,
-  | {
-      id: string
-      chunks: string[]
-      name: string
-    }
-  | undefined
->
-
 type ServerActionsConfig = {
   bodySizeLimit?: SizeLimit
   allowedOrigins?: string[]
@@ -434,13 +424,15 @@ export async function handleAction({
   const contentType = req.headers['content-type']
   const { serverActionsManifest, page } = ctx.renderOpts
 
+  const meta = getServerActionRequestMetadata(req)
+  console.log('handleAction :: server action meta', meta)
   const {
     actionId,
     isURLEncodedAction,
     isMultipartAction,
     isFetchAction,
     isServerAction,
-  } = getServerActionRequestMetadata(req)
+  } = meta
 
   // If it's not a Server Action, skip handling.
   if (!isServerAction) {
@@ -562,7 +554,7 @@ export async function handleAction({
 
   let actionResult: RenderResult | undefined
   let formState: any | undefined
-  let actionModId: string | undefined
+  let actionModId: string | number | undefined
   const actionWasForwarded = Boolean(req.headers['x-action-forwarded'])
 
   if (actionId) {
@@ -736,6 +728,18 @@ export async function handleAction({
               duplex: 'half',
             })
             const formData = await fakeRequest.formData()
+
+            console.log('handleAction :: formData', formData)
+            try {
+              const { id } = JSON.parse(formData.get('$ACTION_1:0') as string)
+              // serverModuleMap is empty for '/client/form-state'...
+              // is it because the action doesn't appear there at all,
+              // and we're doing the manifest by path?
+              console.log('handleAction :: parsed', id, serverModuleMap[id])
+            } catch (err) {
+              console.error(err)
+            }
+
             const action = await decodeAction(formData, serverModuleMap)
             if (typeof action === 'function') {
               // Only warn if it's a server action, otherwise skip for other post requests
@@ -743,6 +747,8 @@ export async function handleAction({
               const actionReturnedState = await action()
               formState = await decodeFormState(actionReturnedState, formData)
             }
+
+            console.log('handleAction :: formState', formState)
 
             // Skip the fetch path
             return
@@ -949,7 +955,7 @@ export async function handleAction({
 function getActionModIdOrError(
   actionId: string | null,
   serverModuleMap: ServerModuleMap
-): string {
+): string | number {
   try {
     // if we're missing the action ID header, we can't do any further processing
     if (!actionId) {

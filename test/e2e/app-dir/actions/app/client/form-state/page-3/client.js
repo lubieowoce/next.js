@@ -1,13 +1,11 @@
 'use client'
 
 import { useActionState } from 'react'
-// import { appendName } from './actions' // make sure appendName ISN'T in the manifest for this page
-import { appendNameAlternate } from './actions-alternate'
 import { useEffect, useState } from 'react'
 
-export default function Page() {
-  const [state, appendNameFormAction] = useActionState(
-    appendNameAlternate,
+export function Form({ action }) {
+  const [state, formAction] = useActionState(
+    action,
     'initial-state',
     '/client/form-state'
   )
@@ -19,7 +17,7 @@ export default function Page() {
 
   return (
     <>
-      <form id="form-state-form" action={appendNameFormAction}>
+      <form id="form-state-form" action={formAction}>
         <p id="form-state">{state}</p>
         <input id="name-input" name="name" />
         <button id="submit-form" type="submit">
