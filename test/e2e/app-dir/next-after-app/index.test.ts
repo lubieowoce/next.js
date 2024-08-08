@@ -26,54 +26,13 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   })
 
   if (skipped) return
+  const pathPrefix = '/' + runtimeValue
 
+  // FIXME(lubieowoce)
   // we currently have some bugs around waitUntil in `runtime = edge`,
   // so some tests will fail due to this error:
   //   "unstable_after()` will not work correctly, because `waitUntil` is not available in the current environment."
   const itMaybe = runtimeValue === 'edge' && isNextDev ? it.failing : it
-
-  const filesToPatchRuntime = ['app/layout.js', 'app/route/route.js']
-  const replaceRuntime = (contents: string, file: string) => {
-    const placeholder = `// export const runtime = 'REPLACE_ME'`
-
-    if (!contents.includes(placeholder)) {
-      throw new Error(`Placeholder "${placeholder}" not found in ${file}`)
-    }
-
-    return contents.replace(
-      placeholder,
-      `export const runtime = '${runtimeValue}'`
-    )
-  }
-
-  const runtimePatches = new Map<
-    string,
-    string | ((contents: string) => string)
-  >(
-    filesToPatchRuntime.map(
-      (file) =>
-        [file, (contents: string) => replaceRuntime(contents, file)] as const
-    )
-  )
-
-  {
-    const originalContents: Record<string, string> = {}
-
-    beforeAll(async () => {
-      for (const file of filesToPatchRuntime) {
-        await next.patchFile(file, (contents) => {
-          originalContents[file] = contents
-          return replaceRuntime(contents, file)
-        })
-      }
-    })
-
-    afterAll(async () => {
-      for (const [file, contents] of Object.entries(originalContents)) {
-        await next.patchFile(file, contents)
-      }
-    })
-  }
 
   let currentCliOutputIndex = 0
   beforeEach(() => {
@@ -89,7 +48,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   }
 
   itMaybe('runs in dynamic pages', async () => {
-    const response = await next.fetch('/123/dynamic')
+    const response = await next.fetch(pathPrefix + '/123/dynamic')
     expect(response.status).toBe(200)
     await retry(() => {
       expect(getLogs()).toContainEqual({ source: '[layout] /[id]' })
@@ -105,7 +64,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   })
 
   it('runs in dynamic route handlers', async () => {
-    const res = await next.fetch('/route')
+    const res = await next.fetch(pathPrefix + '/route')
     expect(res.status).toBe(200)
     await retry(() => {
       expect(getLogs()).toContainEqual({ source: '[route handler] /route' })
@@ -113,7 +72,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   })
 
   itMaybe('runs in server actions', async () => {
-    const browser = await next.browser('/123/with-action')
+    const browser = await next.browser(pathPrefix + '/123/with-action')
     expect(getLogs()).toContainEqual({
       source: '[layout] /[id]',
     })
@@ -134,7 +93,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   })
 
   itMaybe('runs callbacks from nested unstable_after calls', async () => {
-    await next.browser('/nested-after')
+    await next.browser(pathPrefix + '/nested-after')
 
     await retry(() => {
       for (const id of [1, 2, 3]) {
@@ -151,7 +110,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
 
   describe('interrupted RSC renders', () => {
     itMaybe('runs callbacks if redirect() was called', async () => {
-      await next.browser('/interrupted/calls-redirect')
+      await next.browser(pathPrefix + '/interrupted/calls-redirect')
 
       await retry(() => {
         expect(getLogs()).toContainEqual({
@@ -164,7 +123,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
     })
 
     itMaybe('runs callbacks if notFound() was called', async () => {
-      await next.browser('/interrupted/calls-not-found')
+      await next.browser(pathPrefix + '/interrupted/calls-not-found')
       expect(getLogs()).toContainEqual({
         source: '[page] /interrupted/calls-not-found',
       })
@@ -173,7 +132,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
     itMaybe(
       'runs callbacks if a user error was thrown in the RSC render',
       async () => {
-        await next.browser('/interrupted/throws-error')
+        await next.browser(pathPrefix + '/interrupted/throws-error')
         expect(getLogs()).toContainEqual({
           source: '[page] /interrupted/throws-error',
         })
@@ -184,7 +143,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   it('runs in middleware', async () => {
     const requestId = `${Date.now()}`
     const res = await next.fetch(
-      `/middleware/redirect-source?requestId=${requestId}`,
+      pathPrefix + `/middleware/redirect-source?requestId=${requestId}`,
       {
         redirect: 'follow',
         headers: {
@@ -235,7 +194,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
 
         try {
           const pendingReq = next
-            .fetch('/delay', {
+            .fetch(pathPrefix + '/delay', {
               headers: { 'Next-Test-Proxy-Port': String(proxyServer.port) },
             })
             .then(
@@ -293,7 +252,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
   }
 
   itMaybe('runs in generateMetadata()', async () => {
-    await next.browser('/123/with-metadata')
+    await next.browser(pathPrefix + '/123/with-metadata')
     expect(getLogs()).toContainEqual({
       source: '[metadata] /[id]/with-metadata',
       value: '123',
@@ -304,7 +263,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
     const EXPECTED_ERROR =
       /An error occurred in a function passed to `unstable_after\(\)`: .+?: Cookies can only be modified in a Server Action or Route Handler\./
 
-    const browser = await next.browser('/123/setting-cookies')
+    const browser = await next.browser(pathPrefix + '/123/setting-cookies')
     // after() from render
     expect(next.cliOutput).toMatch(EXPECTED_ERROR)
 
@@ -330,7 +289,6 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
     const { cleanup } = await sandbox(
       next,
       new Map([
-        ...runtimePatches,
         [
           // this needs to be injected as early as possible, before the server tries to read the context
           // (which may be even before we load the page component in dev mode)
@@ -343,7 +301,7 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
           `,
         ],
       ]),
-      '/provided-request-context'
+      pathPrefix + '/provided-request-context'
     )
 
     try {
@@ -372,9 +330,8 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
           const { session, cleanup } = await sandbox(
             next,
             new Map([
-              ...runtimePatches,
               [
-                'app/static/page.js',
+                `app/${runtimeValue}/static/page.js`,
                 (contents) =>
                   contents.replace(
                     `// export const dynamic = 'REPLACE_ME'`,
@@ -382,13 +339,13 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
                   ),
               ],
             ]),
-            '/static'
+            pathPrefix + '/static'
           )
 
           try {
             await session.assertHasRedbox()
             expect(await session.getRedboxDescription()).toContain(
-              `Route /static with \`dynamic = "${dynamicValue}"\` couldn't be rendered statically because it used \`unstable_after\``
+              `Route ${pathPrefix}/static with \`dynamic = "${dynamicValue}"\` couldn't be rendered statically because it used \`unstable_after\``
             )
             expect(getLogs()).toHaveLength(0)
           } finally {
@@ -401,13 +358,12 @@ describe.each(runtimes)('unstable_after() in %s runtime', (runtimeValue) => {
         const { session, cleanup } = await sandbox(
           next,
           new Map([
-            ...runtimePatches,
             [
-              'app/invalid-in-client/page.js',
+              `app/${runtimeValue}/invalid-in-client/page.js`,
               (contents) => contents.replace(`// 'use client'`, `'use client'`),
             ],
           ]),
-          '/invalid-in-client'
+          pathPrefix + '/invalid-in-client'
         )
         try {
           await session.assertHasRedbox()
