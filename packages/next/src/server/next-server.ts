@@ -23,6 +23,7 @@ import type { UrlWithParsedQuery } from 'url'
 import type { ParsedUrlQuery } from 'querystring'
 import type { ParsedUrl } from '../shared/lib/router/utils/parse-url'
 import type { Revalidate, ExpireTime } from './lib/revalidate'
+import type { WaitUntil } from './after/builtin-request-context'
 
 import fs from 'fs'
 import { join, resolve } from 'path'
@@ -104,6 +105,7 @@ import type { NextFontManifest } from '../build/webpack/plugins/next-font-manife
 import { isInterceptionRouteRewrite } from '../lib/generate-interception-routes-rewrites'
 import type { ServerOnInstrumentationRequestError } from './app-render/types'
 import { RouteKind } from './route-kind'
+import { InvariantError } from '../shared/lib/invariant-error'
 
 export * from './base-server'
 
@@ -170,6 +172,9 @@ export default class NextNodeServer extends BaseServer<
     req: IncomingMessage,
     res: ServerResponse
   ) => void
+
+  private pendingWaitUntilPromises: Set<Promise<unknown>> = new Set()
+  private internalWaitUntil: WaitUntil | undefined
 
   constructor(options: Options) {
     // Initialize super class
@@ -1858,6 +1863,30 @@ export default class NextNodeServer extends BaseServer<
     // For Node.js runtime production logs, in dev it will be overridden by next-dev-server
     if (!this.renderOpts.dev) {
       this.logError(args[0] as Error)
+    }
+  }
+
+  protected getInternalWaitUntil(): WaitUntil {
+    this.internalWaitUntil ??= this.createInternalWaitUntil()
+    return this.internalWaitUntil
+  }
+
+  private createInternalWaitUntil() {
+    if (this.minimalMode) {
+      throw new InvariantError(
+        'createInternalWaitUntil should never be called in minimal mode'
+      )
+    }
+
+    // TODO(after): warn if exiting before these are awaited?
+    this.serverOptions.onCleanup?.(async () => {
+      await Promise.all(this.pendingWaitUntilPromises)
+    })
+
+    return (promise: Promise<unknown>) => {
+      promise.catch((err) => console.error(err))
+      this.pendingWaitUntilPromises.add(promise)
+      promise.finally(() => this.pendingWaitUntilPromises.delete(promise))
     }
   }
 }

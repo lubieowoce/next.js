@@ -234,6 +234,7 @@ export class NextServer {
 
         this.server = await this.createServer({
           ...this.options,
+          onCleanup: this.onCleanup.bind(this),
           conf,
         })
         if (this.preparedAssetPrefix) {
@@ -260,6 +261,10 @@ export class NextServer {
       })
     }
     return this.reqHandlerPromise
+  }
+
+  private onCleanup(cb: () => Promise<void>): void {
+    this.cleanupListeners.push(cb)
   }
 }
 
