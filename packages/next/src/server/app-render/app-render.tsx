@@ -2275,13 +2275,28 @@ async function renderToStream(
       const environmentName = () =>
         requestStore.prerenderPhase === true ? 'Prerender' : 'Server'
 
+      const [resolveValidation, validationOutlet] = createValidationOutlet()
+      const debugChannel = setReactDebugChannel && createDebugChannel()
+
+      if (debugChannel) {
+        const [readableSsr, readableBrowser] =
+          debugChannel.clientSide.readable.tee()
+
+        reactDebugStream = readableSsr
+
+        setReactDebugChannel(
+          { readable: readableBrowser },
+          htmlRequestId,
+          requestId
+        )
+      }
+
       if (process.env.NEXT_RESTART_ON_CACHE_MISS !== '0') {
         // Try to render the page and see if there's any cache misses.
         // If there are, wait for caches to finish and restart the render.
 
-        const [resolveValidation, validationOutlet] = createValidationOutlet()
-
         const renderRestartable = async (
+          serverDebugChannel: DebugChannelServer | undefined,
           signal: AbortSignal | undefined,
           onPrerenderStageEnd: (() => void) | undefined
         ) => {
@@ -2305,8 +2320,7 @@ async function renderToStream(
                   onError: serverComponentsErrorHandler,
                   environmentName,
                   filterStackFrame,
-                  // TODO(restart-on-cache-miss): implement `debugChannel`
-                  // debugChannel: debugChannel?.serverSide,
+                  debugChannel: serverDebugChannel,
                   signal,
                 }
               )
@@ -2331,12 +2345,18 @@ async function renderToStream(
         requestStore.cacheSignal = cacheSignal
 
         const initialRenderReactController = new AbortController()
+        // We don't know if we'll use this render, so buffer debug channel writes until we find out.
+        const initialRenderServerDebugChannel = debugChannel
+          ? createBufferedServerDebugChannel()
+          : undefined
+
         const hadCacheMissInStaticStagePromise =
           createPromiseWithResolvers<boolean>()
 
         console.debug(`renderToStream (1) :: attempting render`)
 
         const reactServerStreamPromise = renderRestartable(
+          initialRenderServerDebugChannel?.channel,
           initialRenderReactController.signal,
           () => {
             console.debug(
@@ -2359,6 +2379,14 @@ async function renderToStream(
 
         if (!hasCacheMissInStaticStage) {
           // No cache misses. Use the stream as is.
+
+          // The debug info from this render should be written to the real debug channel.
+          if (debugChannel && initialRenderServerDebugChannel) {
+            void initialRenderServerDebugChannel.pipeToChannel(
+              debugChannel.serverSide
+            )
+          }
+
           reactServerResult = new ReactServerResult(
             await reactServerStreamPromise
           )
@@ -2391,14 +2419,23 @@ async function renderToStream(
           )
           requestStore.cacheSignal = null
 
+          // We know we'll use this render, so unlike the initial one,
+          // it can write into the debug channel directly instead of buffering.
+          const finalRenderServerDebugChannel = debugChannel?.serverSide
+
           reactServerResult = new ReactServerResult(
-            await renderRestartable(undefined, () => {
-              console.debug(
-                `renderToStream (2) :: end of static stage after restart. ${cacheSignal['count']} caches pending`
-              )
-            })
+            await renderRestartable(
+              finalRenderServerDebugChannel,
+              undefined,
+              () => {
+                console.debug(
+                  `renderToStream (2) :: end of static stage after restart. ${cacheSignal['count']} caches pending`
+                )
+              }
+            )
           )
         }
+
         // TODO(restart-on-cache-miss):
         // This can probably be optimized to do less work,
         // because we've already made sure that we have warm caches.
@@ -2415,24 +2452,7 @@ async function renderToStream(
         )
       } else {
         const rscPayload = await getPayload()
-
-        const [resolveValidation, validationOutlet] = createValidationOutlet()
         rscPayload._validation = validationOutlet
-
-        const debugChannel = setReactDebugChannel && createDebugChannel()
-
-        if (debugChannel) {
-          const [readableSsr, readableBrowser] =
-            debugChannel.clientSide.readable.tee()
-
-          reactDebugStream = readableSsr
-
-          setReactDebugChannel(
-            { readable: readableBrowser },
-            htmlRequestId,
-            requestId
-          )
-        }
 
         const reactServerStream = await workUnitAsyncStorage.run(
           requestStore,
@@ -2822,12 +2842,21 @@ async function renderToStream(
   }
 }
 
-function createDebugChannel():
-  | {
-      serverSide: { readable?: ReadableStream; writable: WritableStream }
-      clientSide: { readable: ReadableStream; writable?: WritableStream }
-    }
-  | undefined {
+type DebugChannelPair = {
+  serverSide: DebugChannelServer
+  clientSide: DebugChannelClient
+}
+
+type DebugChannelServer = {
+  readable?: ReadableStream<Uint8Array>
+  writable: WritableStream<Uint8Array>
+}
+type DebugChannelClient = {
+  readable: ReadableStream<Uint8Array>
+  writable?: WritableStream<Uint8Array>
+}
+
+function createDebugChannel(): DebugChannelPair | undefined {
   if (process.env.NODE_ENV === 'production') {
     return undefined
   }
@@ -2856,6 +2885,41 @@ function createDebugChannel():
     },
     clientSide: {
       readable: clientSideReadable,
+    },
+  }
+}
+
+function createBufferedServerDebugChannel() {
+  // We buffer all chunks until we're connected to a real debug channel using `connect()`.
+  const chunks: Uint8Array[] = []
+  let onWrite = function bufferChunk(chunk: Uint8Array) {
+    chunks.push(chunk)
+  }
+  let onClose: (() => Promise<void>) | undefined = undefined
+
+  const writable = new WritableStream<Uint8Array>({
+    write(chunk) {
+      onWrite(chunk)
+    },
+    close() {
+      return onClose?.()
+    },
+  })
+
+  return {
+    channel: { writable } as DebugChannelServer,
+    /** Attach this stream to a real debug channel. */
+    async pipeToChannel(debugChannel: DebugChannelServer) {
+      // Once we're comitted to using this stream, write out the chunks we already have.
+      const writer = debugChannel.writable.getWriter()
+      for (const chunk of chunks) {
+        await writer.write(chunk)
+      }
+      chunks.length = 0
+
+      // After this point, we stop buffering, and future chunks will be written directly to the destination.
+      onWrite = writer.write.bind(writer)
+      onClose = writer.close.bind(writer)
     },
   }
 }
