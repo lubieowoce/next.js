@@ -466,6 +466,8 @@ async function collectResult(
         // then it shouldn't have any effects on the prerender. We'll decide
         // whether or not this cache should have its life & tags propagated when
         // we read the entry in the final prerender from the resume data cache.
+
+        // TODO(restart-on-cache-miss): might need to do the same here?
         break
       }
       case 'request':

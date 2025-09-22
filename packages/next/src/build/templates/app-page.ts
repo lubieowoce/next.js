@@ -409,7 +409,8 @@ export async function handler(
         if (
           nextConfig.experimental.cacheComponents &&
           !isPrefetchRSCRequest &&
-          !context.renderOpts.isPossibleServerAction
+          !context.renderOpts.isPossibleServerAction &&
+          process.env.NEXT_RESTART_ON_CACHE_MISS === '0'
         ) {
           const warmup = await routeModule.warmup(nextReq, nextRes, context)
 
