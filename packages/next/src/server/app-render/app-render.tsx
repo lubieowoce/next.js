@@ -197,6 +197,7 @@ import {
   trackPendingChunkLoad,
   trackPendingImport,
   trackPendingModules,
+  trackPendingModulesInRender,
 } from './module-loading/track-module-loading.external'
 import { isReactLargeShellError } from './react-large-shell-error'
 import type { GlobalErrorComponent } from '../../client/components/builtin/global-error'
@@ -2199,6 +2200,12 @@ async function renderToStream(
       // This render might end up being used as a prospective render (if there's cache misses),
       // so we need to set it up for filling caches.
       const cacheSignal = new CacheSignal()
+
+      // If we encounter async modules that delay rendering, we'll also need to restart.
+      // TODO(restart-on-cache-miss): technically, we only need to wait for pending *server* modules here,
+      // but `trackPendingModules` doesn't distinguish between client and server.
+      trackPendingModulesInRender(cacheSignal)
+
       const prerenderResumeDataCache = createPrerenderResumeDataCache()
 
       requestStore.prerenderResumeDataCache = prerenderResumeDataCache
