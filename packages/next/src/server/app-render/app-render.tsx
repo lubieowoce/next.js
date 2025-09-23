@@ -2295,7 +2295,7 @@ async function renderToStream(
         // Try to render the page and see if there's any cache misses.
         // If there are, wait for caches to finish and restart the render.
 
-        const renderRestartable = async (
+        const renderInStages = async (
           serverDebugChannel: DebugChannelServer | undefined,
           signal: AbortSignal | undefined,
           onPrerenderStageEnd: (() => void) | undefined
@@ -2355,7 +2355,7 @@ async function renderToStream(
 
         console.debug(`renderToStream (1) :: attempting render`)
 
-        const reactServerStreamPromise = renderRestartable(
+        const reactServerStreamPromise = renderInStages(
           initialRenderServerDebugChannel?.channel,
           initialRenderReactController.signal,
           () => {
@@ -2424,7 +2424,7 @@ async function renderToStream(
           const finalRenderServerDebugChannel = debugChannel?.serverSide
 
           reactServerResult = new ReactServerResult(
-            await renderRestartable(
+            await renderInStages(
               finalRenderServerDebugChannel,
               undefined,
               () => {
