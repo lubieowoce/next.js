@@ -2279,7 +2279,18 @@ async function renderToStream(
         initialRenderReactController.abort()
 
         console.debug(
-          `renderToStream :: restarting render (cache entries: ${prerenderResumeDataCache.cache.size})`
+          '='.repeat(80) +
+            '\n' +
+            `renderToStream :: restarting render` +
+            (`\n  cache entries: ${prerenderResumeDataCache.cache.size}\n` +
+              [...prerenderResumeDataCache.cache.keys()]
+                .map((k) => '  - ' + k)
+                .join('\n') +
+              `\n  fetch entries: ${prerenderResumeDataCache.fetch.size}\n` +
+              [...prerenderResumeDataCache.fetch.keys()]
+                .map((k) => '  - ' + k)
+                .join('\n') +
+              '\n')
         )
         // The initial render acted as a prospective render.
         // Now, we need to clear the state we've set up for it and do a regular render.
