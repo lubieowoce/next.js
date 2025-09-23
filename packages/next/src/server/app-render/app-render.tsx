@@ -2223,15 +2223,10 @@ async function renderToStream(
       const hadCacheMissInStaticStagePromise =
         createPromiseWithResolvers<boolean>()
 
-      console.debug(`renderToStream (1) :: attempting render`)
-
       const reactServerStreamPromise = renderInStages(
         initialRenderServerDebugChannel?.channel,
         initialRenderReactController.signal,
         () => {
-          console.debug(
-            `renderToStream (1) :: static task finished with ${cacheSignal['count']} caches pending`
-          )
           // If all cache reads initiated in the static stage have completed,
           // then either we don't need to fill any caches, or all of them are warm.
           // On the other hand, if we have pending cache reads, then we had a cache miss.
@@ -2275,23 +2270,8 @@ async function renderToStream(
         // To avoid this, we await `cacheReady` repeatedly with an extra delay to let React try render new content
         // (and potentially discover more caches).
         await cacheSignal.cacheReadyInRender()
-        console.debug(`renderToStream (1) :: cacheReady`)
         initialRenderReactController.abort()
 
-        console.debug(
-          '='.repeat(80) +
-            '\n' +
-            `renderToStream :: restarting render` +
-            (`\n  cache entries: ${prerenderResumeDataCache.cache.size}\n` +
-              [...prerenderResumeDataCache.cache.keys()]
-                .map((k) => '  - ' + k)
-                .join('\n') +
-              `\n  fetch entries: ${prerenderResumeDataCache.fetch.size}\n` +
-              [...prerenderResumeDataCache.fetch.keys()]
-                .map((k) => '  - ' + k)
-                .join('\n') +
-              '\n')
-        )
         // The initial render acted as a prospective render.
         // Now, we need to clear the state we've set up for it and do a regular render.
         requestStore.prerenderResumeDataCache = null
@@ -2305,11 +2285,11 @@ async function renderToStream(
         const finalRenderServerDebugChannel = debugChannel?.serverSide
 
         reactServerResult = new ReactServerResult(
-          await renderInStages(finalRenderServerDebugChannel, undefined, () => {
-            console.debug(
-              `renderToStream (2) :: end of static stage after restart. ${cacheSignal['count']} caches pending`
-            )
-          })
+          await renderInStages(
+            finalRenderServerDebugChannel,
+            undefined,
+            undefined
+          )
         )
       }
 
