@@ -168,7 +168,10 @@ import {
   prerenderAndAbortInSequentialTasks,
 } from './app-render-prerender-utils'
 import { printDebugThrownValueForProspectiveRender } from './prospective-render-utils'
-import { scheduleInSequentialTasks } from './app-render-render-utils'
+import {
+  pipelineInSequentialTasks,
+  scheduleInSequentialTasks,
+} from './app-render-render-utils'
 import { waitAtLeastOneReactRenderTask } from '../../lib/scheduler'
 import {
   workUnitAsyncStorage,
@@ -2128,19 +2131,28 @@ async function renderToStream(
         _validation?: Promise<React.ReactNode>
       }
 
-      const getPayload = (): Promise<RSCPayloadWithValidation> =>
-        workUnitAsyncStorage.run(
-          requestStore,
-          getRSCPayload,
-          tree,
-          ctx,
-          res.statusCode === 404
-        )
+      const [resolveValidation, validationOutlet] = createValidationOutlet()
+
+      const getPayload = async (): Promise<RSCPayloadWithValidation> => {
+        const payload: RSCPayloadWithValidation =
+          await workUnitAsyncStorage.run(
+            requestStore,
+            getRSCPayload,
+            tree,
+            ctx,
+            res.statusCode === 404
+          )
+        // Placing the validation outlet in the payload is safe
+        // even if we end up discarding a render and restarting,
+        // because we're not going to wait for the stream to complete,
+        // so leaving the validation unresolved is fine.
+        payload._validation = validationOutlet
+        return payload
+      }
 
       const environmentName = () =>
         requestStore.prerenderPhase === true ? 'Prerender' : 'Server'
 
-      const [resolveValidation, validationOutlet] = createValidationOutlet()
       const debugChannel = setReactDebugChannel && createDebugChannel()
 
       if (debugChannel) {
@@ -2158,44 +2170,6 @@ async function renderToStream(
 
       // Try to render the page and see if there's any cache misses.
       // If there are, wait for caches to finish and restart the render.
-
-      const renderInStages = async (
-        serverDebugChannel: DebugChannelServer | undefined,
-        signal: AbortSignal | undefined,
-        onPrerenderStageEnd: (() => void) | undefined
-      ) => {
-        const rscPayload = await getPayload()
-
-        // Placing the validation outlet in the payload is safe
-        // even if we end up discarding this render and restarting,
-        // because it's just an output produced independently.
-        rscPayload._validation = validationOutlet
-
-        return workUnitAsyncStorage.run(
-          requestStore,
-          scheduleInSequentialTasks,
-          () => {
-            // Static stage
-            requestStore.prerenderPhase = true
-            return ComponentMod.renderToReadableStream(
-              rscPayload,
-              clientReferenceManifest.clientModules,
-              {
-                onError: serverComponentsErrorHandler,
-                environmentName,
-                filterStackFrame,
-                debugChannel: serverDebugChannel,
-                signal,
-              }
-            )
-          },
-          () => {
-            // Dynamic stage
-            requestStore.prerenderPhase = false
-            onPrerenderStageEnd?.()
-          }
-        )
-      }
 
       // This render might end up being used as a prospective render (if there's cache misses),
       // so we need to set it up for filling caches.
@@ -2216,45 +2190,61 @@ async function renderToStream(
 
       const initialRenderReactController = new AbortController()
       // We don't know if we'll use this render, so buffer debug channel writes until we find out.
-      const initialRenderServerDebugChannel = debugChannel
+      const bufferedServerDebugChannel = debugChannel
         ? createBufferedServerDebugChannel()
         : undefined
 
-      const hadCacheMissInStaticStagePromise =
-        createPromiseWithResolvers<boolean>()
+      const initialRscPayload = await getPayload()
+      const maybeInitialServerStream = await workUnitAsyncStorage.run(
+        requestStore,
+        () =>
+          pipelineInSequentialTasks(
+            () => {
+              // Static stage
+              requestStore.prerenderPhase = true
+              return ComponentMod.renderToReadableStream(
+                initialRscPayload,
+                clientReferenceManifest.clientModules,
+                {
+                  onError: serverComponentsErrorHandler,
+                  environmentName,
+                  filterStackFrame,
+                  debugChannel: bufferedServerDebugChannel?.channel,
+                  signal: initialRenderReactController.signal,
+                }
+              )
+            },
+            async (stream) => {
+              // Dynamic stage
+              // Note: if we had cache misses, things that would've happened statically otherwise
+              // may be marked as dynamic instead.
+              requestStore.prerenderPhase = false
 
-      const reactServerStreamPromise = renderInStages(
-        initialRenderServerDebugChannel?.channel,
-        initialRenderReactController.signal,
-        () => {
-          // If all cache reads initiated in the static stage have completed,
-          // then either we don't need to fill any caches, or all of them are warm.
-          // On the other hand, if we have pending cache reads, then we had a cache miss.
-          hadCacheMissInStaticStagePromise.resolve(
-            cacheSignal.hasPendingReads()
+              // If all cache reads initiated in the static stage have completed,
+              // then all of the necessary caches have to be warm (or there's no caches on the page).
+              // On the other hand, if we still have pending cache reads, then we had a cache miss,
+              // and the static stage didn't render all the content that it normally would have.
+              const hadCacheMiss = cacheSignal.hasPendingReads()
+              if (!hadCacheMiss) {
+                // No cache misses. We can use the stream as is.
+                return stream
+              } else {
+                // Cache miss. We'll discard this stream, and render again.
+                return null
+              }
+            }
           )
-        }
-      )
-      reactServerStreamPromise.catch((err) =>
-        hadCacheMissInStaticStagePromise.reject(err)
       )
 
-      const hasCacheMissInStaticStage =
-        await hadCacheMissInStaticStagePromise.promise
+      if (maybeInitialServerStream !== null) {
+        // No cache misses. We can use the stream as is.
 
-      if (!hasCacheMissInStaticStage) {
-        // No cache misses. Use the stream as is.
-
-        // The debug info from this render should be written to the real debug channel.
-        if (debugChannel && initialRenderServerDebugChannel) {
-          void initialRenderServerDebugChannel.pipeToChannel(
-            debugChannel.serverSide
-          )
+        // Since we're using this render, the debug info we've buffered should be written to the real debug channel.
+        if (debugChannel && bufferedServerDebugChannel) {
+          void bufferedServerDebugChannel.pipeToChannel(debugChannel.serverSide)
         }
 
-        reactServerResult = new ReactServerResult(
-          await reactServerStreamPromise
-        )
+        reactServerResult = new ReactServerResult(maybeInitialServerStream)
       } else {
         // Cache miss. We will use the initial render to fill caches, and discard its result.
         // Then, we can render again with warm caches.
@@ -2272,25 +2262,51 @@ async function renderToStream(
         await cacheSignal.cacheReadyInRender()
         initialRenderReactController.abort()
 
-        // The initial render acted as a prospective render.
-        // Now, we need to clear the state we've set up for it and do a regular render.
+        //===============================================
+
+        // The initial render acted as a prospective render to warm the caches.
+        // Now, we need to do another render.
+
+        // TODO(restart-on-cache-miss): we should use a separate request store for this instead
+
+        // We've filled the caches, so now we can render as usual.
         requestStore.prerenderResumeDataCache = null
         requestStore.renderResumeDataCache = createRenderResumeDataCache(
           prerenderResumeDataCache
         )
         requestStore.cacheSignal = null
 
-        // We know we'll use this render, so unlike the initial one,
-        // it can write into the debug channel directly instead of buffering.
-        const finalRenderServerDebugChannel = debugChannel?.serverSide
+        // Reset mutable fields.
+        requestStore.prerenderPhase = undefined
+        requestStore.usedDynamic = undefined
 
-        reactServerResult = new ReactServerResult(
-          await renderInStages(
-            finalRenderServerDebugChannel,
-            undefined,
-            undefined
-          )
+        const finalRscPayload = await getPayload()
+        const finalServerStream = await workUnitAsyncStorage.run(
+          requestStore,
+          scheduleInSequentialTasks,
+          () => {
+            // Static stage
+            requestStore.prerenderPhase = true
+            return ComponentMod.renderToReadableStream(
+              finalRscPayload,
+              clientReferenceManifest.clientModules,
+              {
+                onError: serverComponentsErrorHandler,
+                environmentName,
+                filterStackFrame,
+                // We know we'll use this render, so unlike the initial one,
+                // it can write into the debug channel directly instead of buffering.
+                debugChannel: debugChannel?.serverSide,
+              }
+            )
+          },
+          () => {
+            // Dynamic stage
+            requestStore.prerenderPhase = false
+          }
         )
+
+        reactServerResult = new ReactServerResult(finalServerStream)
       }
 
       // TODO(restart-on-cache-miss):
