@@ -317,8 +317,8 @@ function createRenderParamsInDev(
   )
 }
 
-interface CacheLifetime {}
-const CachedParams = new WeakMap<CacheLifetime, Promise<Params>>()
+// interface CacheLifetime {}
+// const CachedParams = new WeakMap<CacheLifetime, Promise<Params>>()
 
 const fallbackParamsProxyHandler: ProxyHandler<Promise<Params>> = {
   get: function get(target, prop, receiver) {
@@ -348,14 +348,14 @@ const fallbackParamsProxyHandler: ProxyHandler<Promise<Params>> = {
 }
 
 function makeHangingParams(
-  underlyingParams: Params,
+  _underlyingParams: Params,
   workStore: WorkStore,
   prerenderStore: StaticPrerenderStoreModern
 ): Promise<Params> {
-  const cachedParams = CachedParams.get(underlyingParams)
-  if (cachedParams) {
-    return cachedParams
-  }
+  // const cachedParams = CachedParams.get(underlyingParams)
+  // if (cachedParams) {
+  //   return cachedParams
+  // }
 
   const promise = new Proxy(
     makeHangingPromise<Params>(
@@ -366,7 +366,7 @@ function makeHangingParams(
     fallbackParamsProxyHandler
   )
 
-  CachedParams.set(underlyingParams, promise)
+  // CachedParams.set(underlyingParams, promise)
 
   return promise
 }
@@ -377,10 +377,10 @@ function makeErroringParams(
   workStore: WorkStore,
   prerenderStore: PrerenderStorePPR | PrerenderStoreLegacy
 ): Promise<Params> {
-  const cachedParams = CachedParams.get(underlyingParams)
-  if (cachedParams) {
-    return cachedParams
-  }
+  // const cachedParams = CachedParams.get(underlyingParams)
+  // if (cachedParams) {
+  //   return cachedParams
+  // }
 
   const augmentedUnderlying = { ...underlyingParams }
 
@@ -388,7 +388,7 @@ function makeErroringParams(
   // supports copying with spread and we don't want to unnecessarily
   // instrument the promise with spreadable properties of ReactPromise.
   const promise = Promise.resolve(augmentedUnderlying)
-  CachedParams.set(underlyingParams, promise)
+  // CachedParams.set(underlyingParams, promise)
 
   Object.keys(underlyingParams).forEach((prop) => {
     if (wellKnownProperties.has(prop)) {
@@ -431,26 +431,27 @@ function makeErroringParams(
 }
 
 function makeUntrackedParams(underlyingParams: Params): Promise<Params> {
-  const cachedParams = CachedParams.get(underlyingParams)
-  if (cachedParams) {
-    return cachedParams
-  }
+  // const cachedParams = CachedParams.get(underlyingParams)
+  // if (cachedParams) {
+  //   return cachedParams
+  // }
 
   const promise = Promise.resolve(underlyingParams)
-  CachedParams.set(underlyingParams, promise)
+  // CachedParams.set(underlyingParams, promise)
 
   return promise
 }
 
+let nextId = 0
 function makeDynamicallyTrackedParamsWithDevWarnings(
   underlyingParams: Params,
   hasFallbackParams: boolean,
   store: WorkStore
 ): Promise<Params> {
-  const cachedParams = CachedParams.get(underlyingParams)
-  if (cachedParams) {
-    return cachedParams
-  }
+  // const cachedParams = CachedParams.get(underlyingParams)
+  // if (cachedParams) {
+  //   return cachedParams
+  // }
 
   // We don't use makeResolvedReactPromise here because params
   // supports copying with spread and we don't want to unnecessarily
@@ -459,6 +460,18 @@ function makeDynamicallyTrackedParamsWithDevWarnings(
     ? makeDevtoolsIOAwarePromise(underlyingParams)
     : // We don't want to force an environment transition when this params is not part of the fallback params set
       Promise.resolve(underlyingParams)
+
+  const id = nextId++ + ' ' + JSON.stringify(underlyingParams)
+  promise.then(() => {
+    console.log(
+      `params promise ${id} - resolved (${hasFallbackParams ? 'DELAY' : 'instant'})`
+    )
+  })
+
+  console.log(`params promise ${id} - create`)
+
+  // @ts-expect-error
+  promise['id'] = id
 
   // Track which properties we should warn for.
   const proxiedProperties = new Set<string>()
@@ -498,7 +511,7 @@ function makeDynamicallyTrackedParamsWithDevWarnings(
     },
   })
 
-  CachedParams.set(underlyingParams, proxiedPromise)
+  // CachedParams.set(underlyingParams, proxiedPromise)
   return proxiedPromise
 }
 

@@ -1708,6 +1708,7 @@ async function renderToHTMLOrFlightImpl(
     const rootParams = getRootParams(loaderTree, ctx.getDynamicParamFromSegment)
     const devValidatingFallbackParams =
       getRequestMeta(req, 'devValidatingFallbackParams') || null
+    console.log(`app-render :: ${url}`, { devValidatingFallbackParams })
     const requestStore = createRequestStoreForRender(
       req,
       res,
@@ -2131,7 +2132,7 @@ async function renderToStream(
         _validation?: Promise<React.ReactNode>
       }
 
-      const [resolveValidation, validationOutlet] = createValidationOutlet()
+      // const [resolveValidation, validationOutlet] = createValidationOutlet()
 
       const getPayload = async (): Promise<RSCPayloadWithValidation> => {
         const payload: RSCPayloadWithValidation =
@@ -2146,7 +2147,7 @@ async function renderToStream(
         // even if we end up discarding a render and restarting,
         // because we're not going to wait for the stream to complete,
         // so leaving the validation unresolved is fine.
-        payload._validation = validationOutlet
+        // payload._validation = validationOutlet
         return payload
       }
 
@@ -2199,6 +2200,7 @@ async function renderToStream(
         () =>
           pipelineInSequentialTasks(
             () => {
+              console.log('='.repeat(80) + ' 1. static stage')
               // Static stage
               requestStore.prerenderPhase = true
               return ComponentMod.renderToReadableStream(
@@ -2214,6 +2216,7 @@ async function renderToStream(
               )
             },
             async (stream) => {
+              console.log('='.repeat(80) + ' 1. dynamic stage')
               // Dynamic stage
               // Note: if we had cache misses, things that would've happened statically otherwise
               // may be marked as dynamic instead.
@@ -2261,6 +2264,8 @@ async function renderToStream(
         await cacheSignal.cacheReadyInRender()
         initialRenderReactController.abort()
 
+        console.log('='.repeat(120))
+
         //===============================================
 
         // The initial render acted as a prospective render to warm the caches.
@@ -2293,6 +2298,7 @@ async function renderToStream(
           requestStore,
           scheduleInSequentialTasks,
           () => {
+            console.log('='.repeat(80) + ' 2. static stage')
             // Static stage
             requestStore.prerenderPhase = true
             return ComponentMod.renderToReadableStream(
@@ -2307,6 +2313,7 @@ async function renderToStream(
             )
           },
           () => {
+            console.log('='.repeat(80) + ' 2. dynamic stage')
             // Dynamic stage
             requestStore.prerenderPhase = false
           }
@@ -2315,20 +2322,20 @@ async function renderToStream(
         reactServerResult = new ReactServerResult(finalServerStream)
       }
 
-      // TODO(restart-on-cache-miss):
-      // This can probably be optimized to do less work,
-      // because we've already made sure that we have warm caches.
-      devLogsAsyncStorage.run(
-        { dim: true },
-        spawnDynamicValidationInDev,
-        resolveValidation,
-        tree,
-        ctx,
-        res.statusCode === 404,
-        clientReferenceManifest,
-        requestStore,
-        devValidatingFallbackParams
-      )
+      // // TODO(restart-on-cache-miss):
+      // // This can probably be optimized to do less work,
+      // // because we've already made sure that we have warm caches.
+      // devLogsAsyncStorage.run(
+      //   { dim: true },
+      //   spawnDynamicValidationInDev,
+      //   resolveValidation,
+      //   tree,
+      //   ctx,
+      //   res.statusCode === 404,
+      //   clientReferenceManifest,
+      //   requestStore,
+      //   devValidatingFallbackParams
+      // )
     } else {
       // This is a dynamic render. We don't do dynamic tracking because we're not prerendering
       const RSCPayload = await workUnitAsyncStorage.run(

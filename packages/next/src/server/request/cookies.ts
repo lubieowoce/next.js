@@ -143,27 +143,27 @@ function createEmptyCookies(): ReadonlyRequestCookies {
   return RequestCookiesAdapter.seal(new RequestCookies(new Headers({})))
 }
 
-interface CacheLifetime {}
-const CachedCookies = new WeakMap<
-  CacheLifetime,
-  Promise<ReadonlyRequestCookies>
->()
+// interface CacheLifetime {}
+// const CachedCookies = new WeakMap<
+//   CacheLifetime,
+//   Promise<ReadonlyRequestCookies>
+// >()
 
 function makeHangingCookies(
   workStore: WorkStore,
   prerenderStore: PrerenderStoreModern
 ): Promise<ReadonlyRequestCookies> {
-  const cachedPromise = CachedCookies.get(prerenderStore)
-  if (cachedPromise) {
-    return cachedPromise
-  }
+  // const cachedPromise = CachedCookies.get(prerenderStore)
+  // if (cachedPromise) {
+  //   return cachedPromise
+  // }
 
   const promise = makeHangingPromise<ReadonlyRequestCookies>(
     prerenderStore.renderSignal,
     workStore.route,
     '`cookies()`'
   )
-  CachedCookies.set(prerenderStore, promise)
+  // CachedCookies.set(prerenderStore, promise)
 
   return promise
 }
@@ -171,13 +171,13 @@ function makeHangingCookies(
 function makeUntrackedCookies(
   underlyingCookies: ReadonlyRequestCookies
 ): Promise<ReadonlyRequestCookies> {
-  const cachedCookies = CachedCookies.get(underlyingCookies)
-  if (cachedCookies) {
-    return cachedCookies
-  }
+  // const cachedCookies = CachedCookies.get(underlyingCookies)
+  // if (cachedCookies) {
+  //   return cachedCookies
+  // }
 
   const promise = Promise.resolve(underlyingCookies)
-  CachedCookies.set(underlyingCookies, promise)
+  // CachedCookies.set(underlyingCookies, promise)
 
   return promise
 }
@@ -186,10 +186,10 @@ function makeUntrackedCookiesWithDevWarnings(
   underlyingCookies: ReadonlyRequestCookies,
   route?: string
 ): Promise<ReadonlyRequestCookies> {
-  const cachedCookies = CachedCookies.get(underlyingCookies)
-  if (cachedCookies) {
-    return cachedCookies
-  }
+  // const cachedCookies = CachedCookies.get(underlyingCookies)
+  // if (cachedCookies) {
+  //   return cachedCookies
+  // }
 
   const promise = makeDevtoolsIOAwarePromise(underlyingCookies)
 
@@ -220,7 +220,7 @@ function makeUntrackedCookiesWithDevWarnings(
     },
   })
 
-  CachedCookies.set(underlyingCookies, proxiedPromise)
+  // CachedCookies.set(underlyingCookies, proxiedPromise)
 
   return proxiedPromise
 }

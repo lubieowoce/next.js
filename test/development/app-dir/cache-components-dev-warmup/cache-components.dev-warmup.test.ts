@@ -139,4 +139,39 @@ describe('cache-components-dev-warmup', () => {
       await assertLogs()
     })
   })
+
+  it('runtime/dynamic APIs', async () => {
+    const path = '/apis/123'
+    const browser = await next.browser(path)
+
+    const assertLogs = async () => {
+      const logs = await browser.log()
+      assertLog(logs, 'after cache read - page', 'Prerender')
+
+      for (const apiName of [
+        'cookies',
+        'headers',
+        'params',
+        'searchParams',
+        'connection',
+      ]) {
+        assertLog(logs, `after ${apiName}`, 'Server')
+      }
+    }
+
+    // Initial load.
+    await assertLogs()
+
+    // After another load (with warm caches) the logs should be the same.
+    await browser.loadPage(next.url + path) // clears old logs
+    await assertLogs()
+
+    // After a revalidation the subsequent warmup render must discard stale
+    // cache entries.
+    // This should not affect the environment labels.
+    await next.fetch(`/revalidate?path=${encodeURIComponent(path)}`)
+
+    await browser.loadPage(next.url + path) // clears old logs
+    await assertLogs()
+  })
 })

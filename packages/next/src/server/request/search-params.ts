@@ -202,22 +202,22 @@ function createRenderSearchParams(
   }
 }
 
-interface CacheLifetime {}
-const CachedSearchParams = new WeakMap<CacheLifetime, Promise<SearchParams>>()
+// interface CacheLifetime {}
+// const CachedSearchParams = new WeakMap<CacheLifetime, Promise<SearchParams>>()
 
-const CachedSearchParamsForUseCache = new WeakMap<
-  CacheLifetime,
-  Promise<SearchParams>
->()
+// const CachedSearchParamsForUseCache = new WeakMap<
+//   CacheLifetime,
+//   Promise<SearchParams>
+// >()
 
 function makeHangingSearchParams(
   workStore: WorkStore,
   prerenderStore: PrerenderStoreModern
 ): Promise<SearchParams> {
-  const cachedSearchParams = CachedSearchParams.get(prerenderStore)
-  if (cachedSearchParams) {
-    return cachedSearchParams
-  }
+  // const cachedSearchParams = CachedSearchParams.get(prerenderStore)
+  // if (cachedSearchParams) {
+  //   return cachedSearchParams
+  // }
 
   const promise = makeHangingPromise<SearchParams>(
     prerenderStore.renderSignal,
@@ -255,7 +255,7 @@ function makeHangingSearchParams(
     },
   })
 
-  CachedSearchParams.set(prerenderStore, proxiedPromise)
+  // CachedSearchParams.set(prerenderStore, proxiedPromise)
   return proxiedPromise
 }
 
@@ -263,10 +263,10 @@ function makeErroringSearchParams(
   workStore: WorkStore,
   prerenderStore: PrerenderStoreLegacy | PrerenderStorePPR
 ): Promise<SearchParams> {
-  const cachedSearchParams = CachedSearchParams.get(workStore)
-  if (cachedSearchParams) {
-    return cachedSearchParams
-  }
+  // const cachedSearchParams = CachedSearchParams.get(workStore)
+  // if (cachedSearchParams) {
+  //   return cachedSearchParams
+  // }
 
   const underlyingSearchParams = {}
   // For search params we don't construct a ReactPromise because we want to interrupt
@@ -311,7 +311,7 @@ function makeErroringSearchParams(
     },
   })
 
-  CachedSearchParams.set(workStore, proxiedPromise)
+  // CachedSearchParams.set(workStore, proxiedPromise)
   return proxiedPromise
 }
 
@@ -323,10 +323,10 @@ function makeErroringSearchParams(
 export function makeErroringSearchParamsForUseCache(
   workStore: WorkStore
 ): Promise<SearchParams> {
-  const cachedSearchParams = CachedSearchParamsForUseCache.get(workStore)
-  if (cachedSearchParams) {
-    return cachedSearchParams
-  }
+  // const cachedSearchParams = CachedSearchParamsForUseCache.get(workStore)
+  // if (cachedSearchParams) {
+  //   return cachedSearchParams
+  // }
 
   const promise = Promise.resolve({})
 
@@ -351,20 +351,20 @@ export function makeErroringSearchParamsForUseCache(
     },
   })
 
-  CachedSearchParamsForUseCache.set(workStore, proxiedPromise)
+  // CachedSearchParamsForUseCache.set(workStore, proxiedPromise)
   return proxiedPromise
 }
 
 function makeUntrackedSearchParams(
   underlyingSearchParams: SearchParams
 ): Promise<SearchParams> {
-  const cachedSearchParams = CachedSearchParams.get(underlyingSearchParams)
-  if (cachedSearchParams) {
-    return cachedSearchParams
-  }
+  // const cachedSearchParams = CachedSearchParams.get(underlyingSearchParams)
+  // if (cachedSearchParams) {
+  //   return cachedSearchParams
+  // }
 
   const promise = Promise.resolve(underlyingSearchParams)
-  CachedSearchParams.set(underlyingSearchParams, promise)
+  // CachedSearchParams.set(underlyingSearchParams, promise)
 
   return promise
 }
@@ -373,10 +373,10 @@ function makeUntrackedSearchParamsWithDevWarnings(
   underlyingSearchParams: SearchParams,
   store: WorkStore
 ): Promise<SearchParams> {
-  const cachedSearchParams = CachedSearchParams.get(underlyingSearchParams)
-  if (cachedSearchParams) {
-    return cachedSearchParams
-  }
+  // const cachedSearchParams = CachedSearchParams.get(underlyingSearchParams)
+  // if (cachedSearchParams) {
+  //   return cachedSearchParams
+  // }
 
   // Track which properties we should warn for.
   const proxiedProperties = new Set<string>()
@@ -500,7 +500,7 @@ function makeUntrackedSearchParamsWithDevWarnings(
     },
   })
 
-  CachedSearchParams.set(underlyingSearchParams, proxiedPromise)
+  // CachedSearchParams.set(underlyingSearchParams, proxiedPromise)
   return proxiedPromise
 }
 

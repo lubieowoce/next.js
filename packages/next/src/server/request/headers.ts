@@ -155,24 +155,24 @@ export function headers(): Promise<ReadonlyHeaders> {
   throwForMissingRequestStore(callingExpression)
 }
 
-interface CacheLifetime {}
-const CachedHeaders = new WeakMap<CacheLifetime, Promise<ReadonlyHeaders>>()
+// interface CacheLifetime {}
+// const CachedHeaders = new WeakMap<CacheLifetime, Promise<ReadonlyHeaders>>()
 
 function makeHangingHeaders(
   workStore: WorkStore,
   prerenderStore: PrerenderStoreModern
 ): Promise<ReadonlyHeaders> {
-  const cachedHeaders = CachedHeaders.get(prerenderStore)
-  if (cachedHeaders) {
-    return cachedHeaders
-  }
+  // const cachedHeaders = CachedHeaders.get(prerenderStore)
+  // if (cachedHeaders) {
+  //   return cachedHeaders
+  // }
 
   const promise = makeHangingPromise<ReadonlyHeaders>(
     prerenderStore.renderSignal,
     workStore.route,
     '`headers()`'
   )
-  CachedHeaders.set(prerenderStore, promise)
+  // CachedHeaders.set(prerenderStore, promise)
 
   return promise
 }
@@ -180,13 +180,13 @@ function makeHangingHeaders(
 function makeUntrackedHeaders(
   underlyingHeaders: ReadonlyHeaders
 ): Promise<ReadonlyHeaders> {
-  const cachedHeaders = CachedHeaders.get(underlyingHeaders)
-  if (cachedHeaders) {
-    return cachedHeaders
-  }
+  // const cachedHeaders = CachedHeaders.get(underlyingHeaders)
+  // if (cachedHeaders) {
+  //   return cachedHeaders
+  // }
 
   const promise = Promise.resolve(underlyingHeaders)
-  CachedHeaders.set(underlyingHeaders, promise)
+  // CachedHeaders.set(underlyingHeaders, promise)
 
   return promise
 }
@@ -195,10 +195,10 @@ function makeUntrackedHeadersWithDevWarnings(
   underlyingHeaders: ReadonlyHeaders,
   route?: string
 ): Promise<ReadonlyHeaders> {
-  const cachedHeaders = CachedHeaders.get(underlyingHeaders)
-  if (cachedHeaders) {
-    return cachedHeaders
-  }
+  // const cachedHeaders = CachedHeaders.get(underlyingHeaders)
+  // if (cachedHeaders) {
+  //   return cachedHeaders
+  // }
 
   const promise = makeDevtoolsIOAwarePromise(underlyingHeaders)
 
@@ -231,7 +231,7 @@ function makeUntrackedHeadersWithDevWarnings(
     },
   })
 
-  CachedHeaders.set(underlyingHeaders, proxiedPromise)
+  // CachedHeaders.set(underlyingHeaders, proxiedPromise)
 
   return proxiedPromise
 }
