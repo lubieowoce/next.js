@@ -4,6 +4,7 @@ import { isReactLargeShellError } from './react-large-shell-error'
 export enum Phase {
   ProspectiveRender = 'the prospective render',
   SegmentCollection = 'segment collection',
+  PrefetchValidation = 'prefetch validation',
 }
 
 export function printDebugThrownValueForProspectiveRender(

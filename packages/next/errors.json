@@ -980,5 +980,11 @@
   "979": "invariant: expected %s bytes of postponed state but only received %s bytes",
   "980": "Failed to load client middleware manifest",
   "981": "resolvedPathname must be set in request metadata",
-  "982": "`serializeResumeDataCache` should not be called in edge runtime."
+  "982": "`serializeResumeDataCache` should not be called in edge runtime.",
+  "983": "InitialRSCPayload does not match the expected shape during prefetch validation.",
+  "984": "Got unexpected empty seed data during prefetch validation",
+  "985": "createDebugFriendlyNodeStreamFromChunks cannot be used in the edge runtime",
+  "986": "Missing segment data: %s",
+  "987": "Unexpected state while traversing route tree: %s",
+  "988": "Unexpected `export const unstable_prefetch = false` in new tree"
 }

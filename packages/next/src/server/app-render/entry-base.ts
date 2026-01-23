@@ -42,6 +42,11 @@ export { Postpone } from './rsc/postpone'
 export { taintObjectReference } from './rsc/taint'
 export { collectSegmentData } from './collect-segment-data'
 
+export const prefetchValidation =
+  process.env.NODE_ENV === 'development'
+    ? (require('./prefetch-validation/prefetch-validation') as typeof import('./prefetch-validation/prefetch-validation'))
+    : undefined
+
 import { workAsyncStorage } from '../app-render/work-async-storage.external'
 import { workUnitAsyncStorage } from './work-unit-async-storage.external'
 import { patchFetch as _patchFetch } from '../lib/patch-fetch'

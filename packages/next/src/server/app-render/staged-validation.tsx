@@ -33,3 +33,39 @@ export async function anySegmentHasRuntimePrefetchEnabled(
 
   return false
 }
+
+type FoundSegmentWithConfig = {
+  path: string[]
+  config: NonNullable<AppSegmentConfig['unstable_prefetch']>
+}
+
+export async function findSegmentsWithPrefetchConfig(
+  rootTree: LoaderTree
+): Promise<FoundSegmentWithConfig[]> {
+  const results: FoundSegmentWithConfig[] = []
+
+  async function visit(tree: LoaderTree, path: string[]): Promise<void> {
+    const { mod: layoutOrPageMod } = await getLayoutOrPageModule(tree)
+
+    // TODO(restart-on-cache-miss): Does this work correctly for client page/layout modules?
+    const prefetchConfig = layoutOrPageMod
+      ? (layoutOrPageMod as AppSegmentConfig).unstable_prefetch
+      : undefined
+    /** Whether this segment should use a runtime prefetch instead of a static prefetch. */
+    if (prefetchConfig !== undefined) {
+      results.push({
+        path,
+        config: prefetchConfig,
+      })
+    }
+
+    const { parallelRoutes } = parseLoaderTree(tree)
+    for (const parallelRouteKey in parallelRoutes) {
+      const childTree = parallelRoutes[parallelRouteKey]
+      await visit(childTree, [...path, parallelRouteKey])
+    }
+  }
+
+  await visit(rootTree, [])
+  return results
+}
