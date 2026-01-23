@@ -37,13 +37,14 @@ const RuntimePrefetchSchema = z
     expectUnableToVerify: z.boolean().optional(),
   })
   .strict()
+const NoPrefetchSchema = z.literal(false)
 
-const PrefetchSchema = z.discriminatedUnion('mode', [
-  StaticPrefetchSchema,
-  RuntimePrefetchSchema,
+const PrefetchSchema = z.union([
+  z.discriminatedUnion('mode', [StaticPrefetchSchema, RuntimePrefetchSchema]),
+  NoPrefetchSchema,
 ])
 
-export type Prefetch = StaticPrefetch | RuntimePrefetch
+export type Prefetch = StaticPrefetch | RuntimePrefetch | false
 export type PrefetchForTypeCheckInternal = __GenericPrefetch | Prefetch
 // the __GenericPrefetch type is used to avoid type widening issues with
 // our choice to make exports the medium for programming a Next.js application
@@ -169,7 +170,7 @@ export function parseAppSegmentConfig(
           case 'unstable_prefetch': {
             return {
               // @TODO replace this link with a link to the docs when they are written
-              message: `Invalid unstable_prefetch value ${JSON.stringify(ctx.data)} on "${route}", must be an object with a mode of "static" or "runtime". Read more at https://nextjs.org/docs/messages/invalid-prefetch-configuration`,
+              message: `Invalid unstable_prefetch value ${JSON.stringify(ctx.data)} on "${route}", must be an object with a mode of "static" or "runtime", or false. Read more at https://nextjs.org/docs/messages/invalid-prefetch-configuration`,
             }
           }
           default:

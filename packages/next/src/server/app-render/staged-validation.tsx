@@ -13,7 +13,10 @@ export async function anySegmentHasRuntimePrefetchEnabled(
     ? (layoutOrPageMod as AppSegmentConfig).unstable_prefetch
     : undefined
   /** Whether this segment should use a runtime prefetch instead of a static prefetch. */
-  const hasRuntimePrefetch = prefetchConfig?.mode === 'runtime'
+  const hasRuntimePrefetch =
+    prefetchConfig && typeof prefetchConfig === 'object'
+      ? prefetchConfig.mode === 'runtime'
+      : false
   if (hasRuntimePrefetch) {
     return true
   }
