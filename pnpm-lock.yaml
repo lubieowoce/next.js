@@ -28,6 +28,18 @@ patchedDependencies:
   '@types/node@20.17.6':
     hash: rvl3vkomen3tospgr67bzubfyu
     path: patches/@types__node@20.17.6.patch
+  react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121:
+    hash: qbq3pwg2vl5hfo3zpu6kxi6jmy
+    path: patches/react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121.patch
+  react-server-dom-turbopack@19.3.0-canary-b546603b-20260121:
+    hash: gzlnni4p6xov62hnxljgu7e23m
+    path: patches/react-server-dom-turbopack@19.3.0-canary-b546603b-20260121.patch
+  react-server-dom-webpack@0.0.0-experimental-b546603b-20260121:
+    hash: ykwwhcaykjagyegfcthjzq5o3e
+    path: patches/react-server-dom-webpack@0.0.0-experimental-b546603b-20260121.patch
+  react-server-dom-webpack@19.3.0-canary-b546603b-20260121:
+    hash: hoe6entcvb4es6hklzxscuqjqy
+    path: patches/react-server-dom-webpack@19.3.0-canary-b546603b-20260121.patch
   stacktrace-parser@0.1.10:
     hash: x5tdcojc7b5m2b5ojepbcdl36a
     path: patches/stacktrace-parser@0.1.10.patch
@@ -503,16 +515,16 @@ importers:
         version: react-is@19.3.0-canary-b546603b-20260121
       react-server-dom-turbopack:
         specifier: 19.3.0-canary-b546603b-20260121
-        version: 19.3.0-canary-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)
+        version: 19.3.0-canary-b546603b-20260121(patch_hash=gzlnni4p6xov62hnxljgu7e23m)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)
       react-server-dom-turbopack-experimental:
         specifier: npm:react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121
-        version: react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)
+        version: react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121(patch_hash=qbq3pwg2vl5hfo3zpu6kxi6jmy)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)
       react-server-dom-webpack:
         specifier: 19.3.0-canary-b546603b-20260121
-        version: 19.3.0-canary-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15)))
+        version: 19.3.0-canary-b546603b-20260121(patch_hash=hoe6entcvb4es6hklzxscuqjqy)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15)))
       react-server-dom-webpack-experimental:
         specifier: npm:react-server-dom-webpack@0.0.0-experimental-b546603b-20260121
-        version: react-server-dom-webpack@0.0.0-experimental-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15)))
+        version: react-server-dom-webpack@0.0.0-experimental-b546603b-20260121(patch_hash=ykwwhcaykjagyegfcthjzq5o3e)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15)))
       react-ssr-prepass:
         specifier: 1.0.8
         version: 1.0.8(react-is@19.3.0-canary-fd524fe0-20251121)(react@19.3.0-canary-b546603b-20260121)
@@ -35745,21 +35757,21 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.2.2
 
-  react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121):
+  react-server-dom-turbopack@0.0.0-experimental-b546603b-20260121(patch_hash=qbq3pwg2vl5hfo3zpu6kxi6jmy)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121):
     dependencies:
       acorn-loose: 8.3.0
       neo-async: 2.6.1
       react: 19.3.0-canary-b546603b-20260121
       react-dom: 19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121)
 
-  react-server-dom-turbopack@19.3.0-canary-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121):
+  react-server-dom-turbopack@19.3.0-canary-b546603b-20260121(patch_hash=gzlnni4p6xov62hnxljgu7e23m)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121):
     dependencies:
       acorn-loose: 8.3.0
       neo-async: 2.6.1
       react: 19.3.0-canary-b546603b-20260121
       react-dom: 19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121)
 
-  react-server-dom-webpack@0.0.0-experimental-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15))):
+  react-server-dom-webpack@0.0.0-experimental-b546603b-20260121(patch_hash=ykwwhcaykjagyegfcthjzq5o3e)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15))):
     dependencies:
       acorn-loose: 8.3.0
       neo-async: 2.6.1
@@ -35768,7 +35780,7 @@ snapshots:
       webpack: 5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15))
       webpack-sources: 3.2.3(patch_hash=jbynf5dc46ambamq3wuyho6hkq)
 
-  react-server-dom-webpack@19.3.0-canary-b546603b-20260121(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15))):
+  react-server-dom-webpack@19.3.0-canary-b546603b-20260121(patch_hash=hoe6entcvb4es6hklzxscuqjqy)(react-dom@19.3.0-canary-b546603b-20260121(react@19.3.0-canary-b546603b-20260121))(react@19.3.0-canary-b546603b-20260121)(webpack@5.98.0(@swc/core@1.11.24(@swc/helpers@0.5.15))):
     dependencies:
       acorn-loose: 8.3.0
       neo-async: 2.6.1

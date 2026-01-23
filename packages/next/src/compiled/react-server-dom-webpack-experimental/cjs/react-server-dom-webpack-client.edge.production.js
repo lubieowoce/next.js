@@ -8,1353 +8,2251 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-"use strict";
-var ReactDOM = require("react-dom"),
-  decoderOptions = { stream: !0 },
-  hasOwnProperty = Object.prototype.hasOwnProperty;
+'use strict';
+
+var ReactDOM = require('react-dom');
+
+function createStringDecoder() {
+  return new TextDecoder();
+}
+const decoderOptions = {
+  stream: true
+};
+function readPartialStringChunk(decoder, buffer) {
+  return decoder.decode(buffer, decoderOptions);
+}
+function readFinalStringChunk(decoder, buffer) {
+  return decoder.decode(buffer);
+}
+
+// This is the parsed shape of the wire format which is why it is
+// condensed to only the essentialy information
+
+const ID = 0;
+const CHUNKS = 1;
+const NAME = 2;
+// export const ASYNC = 3;
+
+// This logic is correct because currently only include the 4th tuple member
+// when the module is async. If that changes we will need to actually assert
+// the value is true. We don't index into the 4th slot because flow does not
+// like the potential out of bounds access
+function isAsyncImport(metadata) {
+  return metadata.length === 4;
+}
+
+// $FlowFixMe[method-unbinding]
+const hasOwnProperty = Object.prototype.hasOwnProperty;
+
+// eslint-disable-next-line no-unused-vars
+
+// The reason this function needs to defined here in this file instead of just
+// being exported directly from the WebpackDestination... file is because the
+// ClientReferenceMetadata is opaque and we can't unwrap it there.
+// This should get inlined and we could also just implement an unwrapping function
+// though that risks it getting used in places it shouldn't be. This is unfortunate
+// but currently it seems to be the best option we have.
+function prepareDestinationForModule(moduleLoading, nonce, metadata) {
+  prepareDestinationWithChunks(moduleLoading, metadata[CHUNKS], nonce);
+}
 function resolveClientReference(bundlerConfig, metadata) {
   if (bundlerConfig) {
-    var moduleExports = bundlerConfig[metadata[0]];
-    if ((bundlerConfig = moduleExports && moduleExports[metadata[2]]))
-      moduleExports = bundlerConfig.name;
-    else {
-      bundlerConfig = moduleExports && moduleExports["*"];
-      if (!bundlerConfig)
-        throw Error(
-          'Could not find the module "' +
-            metadata[0] +
-            '" in the React Server Consumer Manifest. This is probably a bug in the React Server Components bundler.'
-        );
-      moduleExports = metadata[2];
+    const moduleExports = bundlerConfig[metadata[ID]];
+    let resolvedModuleData = moduleExports && moduleExports[metadata[NAME]];
+    let name;
+    if (resolvedModuleData) {
+      // The potentially aliased name.
+      name = resolvedModuleData.name;
+    } else {
+      // If we don't have this specific name, we might have the full module.
+      resolvedModuleData = moduleExports && moduleExports['*'];
+      if (!resolvedModuleData) {
+        throw new Error('Could not find the module "' + metadata[ID] + '" in the React Server Consumer Manifest. ' + 'This is probably a bug in the React Server Components bundler.');
+      }
+      name = metadata[NAME];
     }
-    return 4 === metadata.length
-      ? [bundlerConfig.id, bundlerConfig.chunks, moduleExports, 1]
-      : [bundlerConfig.id, bundlerConfig.chunks, moduleExports];
+    // Note that resolvedModuleData.async may be set if this is an Async Module.
+    // For Client References we don't actually care because what matters is whether
+    // the consumer expects an unwrapped async module or just a raw Promise so it
+    // has to already know which one it wants.
+    // We could error if this is an Async Import but it's not an Async Module.
+    // However, we also support plain CJS exporting a top level Promise which is not
+    // an Async Module according to the bundle graph but is effectively the same.
+    if (isAsyncImport(metadata)) {
+      return [resolvedModuleData.id, resolvedModuleData.chunks, name, 1 /* async */];
+    } else {
+      return [resolvedModuleData.id, resolvedModuleData.chunks, name];
+    }
   }
   return metadata;
 }
 function resolveServerReference(bundlerConfig, id) {
-  var name = "",
-    resolvedModuleData = bundlerConfig[id];
-  if (resolvedModuleData) name = resolvedModuleData.name;
-  else {
-    var idx = id.lastIndexOf("#");
-    -1 !== idx &&
-      ((name = id.slice(idx + 1)),
-      (resolvedModuleData = bundlerConfig[id.slice(0, idx)]));
-    if (!resolvedModuleData)
-      throw Error(
-        'Could not find the module "' +
-          id +
-          '" in the React Server Manifest. This is probably a bug in the React Server Components bundler.'
-      );
+  let name = '';
+  let resolvedModuleData = bundlerConfig[id];
+  if (resolvedModuleData) {
+    // The potentially aliased name.
+    name = resolvedModuleData.name;
+  } else {
+    // We didn't find this specific export name but we might have the * export
+    // which contains this name as well.
+    // TODO: It's unfortunate that we now have to parse this string. We should
+    // probably go back to encoding path and name separately on the client reference.
+    const idx = id.lastIndexOf('#');
+    if (idx !== -1) {
+      name = id.slice(idx + 1);
+      resolvedModuleData = bundlerConfig[id.slice(0, idx)];
+    }
+    if (!resolvedModuleData) {
+      throw new Error('Could not find the module "' + id + '" in the React Server Manifest. ' + 'This is probably a bug in the React Server Components bundler.');
+    }
   }
-  return resolvedModuleData.async
-    ? [resolvedModuleData.id, resolvedModuleData.chunks, name, 1]
-    : [resolvedModuleData.id, resolvedModuleData.chunks, name];
+  if (resolvedModuleData.async) {
+    // If the module is marked as async in a Client Reference, we don't actually care.
+    // What matters is whether the consumer wants to unwrap it or not.
+    // For Server References, it is different because the consumer is completely internal
+    // to the bundler. So instead of passing it to each reference we can mark it in the
+    // manifest.
+    return [resolvedModuleData.id, resolvedModuleData.chunks, name, 1 /* async */];
+  }
+  return [resolvedModuleData.id, resolvedModuleData.chunks, name];
 }
-var chunkCache = new Map();
+
+// The chunk cache contains all the chunks we've preloaded so far.
+// If they're still pending they're a thenable. This map also exists
+// in Webpack but unfortunately it's not exposed so we have to
+// replicate it in user space. null means that it has already loaded.
+const chunkCache = new Map();
 function requireAsyncModule(id) {
-  var promise = globalThis.__next_require__(id);
-  if ("function" !== typeof promise.then || "fulfilled" === promise.status)
+  // We've already loaded all the chunks. We can require the module.
+  const promise = globalThis.__next_require__(id);
+  if (typeof promise.then !== 'function') {
+    // This wasn't a promise after all.
     return null;
-  promise.then(
-    function (value) {
-      promise.status = "fulfilled";
-      promise.value = value;
-    },
-    function (reason) {
-      promise.status = "rejected";
-      promise.reason = reason;
-    }
-  );
-  return promise;
-}
-function ignoreReject() {}
-function preloadModule(metadata) {
-  for (var chunks = metadata[1], promises = [], i = 0; i < chunks.length; ) {
-    var chunkId = chunks[i++];
-    chunks[i++];
-    var entry = chunkCache.get(chunkId);
-    if (void 0 === entry) {
-      entry = __webpack_chunk_load__(chunkId);
-      promises.push(entry);
-      var resolve = chunkCache.set.bind(chunkCache, chunkId, null);
-      entry.then(resolve, ignoreReject);
-      chunkCache.set(chunkId, entry);
-    } else null !== entry && promises.push(entry);
+  } else if (promise.status === 'fulfilled') {
+    // This module was already resolved earlier.
+    return null;
+  } else {
+    // Instrument the Promise to stash the result.
+    promise.then(value => {
+      const fulfilledThenable = promise;
+      fulfilledThenable.status = 'fulfilled';
+      fulfilledThenable.value = value;
+    }, reason => {
+      const rejectedThenable = promise;
+      rejectedThenable.status = 'rejected';
+      rejectedThenable.reason = reason;
+    });
+    return promise;
   }
-  return 4 === metadata.length
-    ? 0 === promises.length
-      ? requireAsyncModule(metadata[0])
-      : Promise.all(promises).then(function () {
-          return requireAsyncModule(metadata[0]);
-        })
-    : 0 < promises.length
-      ? Promise.all(promises)
-      : null;
 }
-function requireModule(metadata) {
-  var moduleExports = globalThis.__next_require__(metadata[0]);
-  if (4 === metadata.length && "function" === typeof moduleExports.then)
-    if ("fulfilled" === moduleExports.status)
-      moduleExports = moduleExports.value;
-    else throw moduleExports.reason;
-  if ("*" === metadata[2]) return moduleExports;
-  if ("" === metadata[2])
-    return moduleExports.__esModule ? moduleExports.default : moduleExports;
-  if (hasOwnProperty.call(moduleExports, metadata[2]))
-    return moduleExports[metadata[2]];
+function ignoreReject() {
+  // We rely on rejected promises to be handled by another listener.
 }
-function prepareDestinationWithChunks(moduleLoading, chunks, nonce$jscomp$0) {
-  if (null !== moduleLoading)
-    for (var i = 1; i < chunks.length; i += 2) {
-      var nonce = nonce$jscomp$0,
-        JSCompiler_temp_const = ReactDOMSharedInternals.d,
-        JSCompiler_temp_const$jscomp$0 = JSCompiler_temp_const.X,
-        JSCompiler_temp_const$jscomp$1 = moduleLoading.prefix + chunks[i];
-      var JSCompiler_inline_result = moduleLoading.crossOrigin;
-      JSCompiler_inline_result =
-        "string" === typeof JSCompiler_inline_result
-          ? "use-credentials" === JSCompiler_inline_result
-            ? JSCompiler_inline_result
-            : ""
-          : void 0;
-      JSCompiler_temp_const$jscomp$0.call(
-        JSCompiler_temp_const,
-        JSCompiler_temp_const$jscomp$1,
-        { crossOrigin: JSCompiler_inline_result, nonce: nonce }
-      );
+// Start preloading the modules since we might need them soon.
+// This function doesn't suspend.
+function preloadModule(metadata) {
+  const chunks = metadata[CHUNKS];
+  const promises = [];
+  let i = 0;
+  while (i < chunks.length) {
+    const chunkId = chunks[i++];
+    chunks[i++];
+    const entry = chunkCache.get(chunkId);
+    if (entry === undefined) {
+      const thenable = loadChunk(chunkId);
+      promises.push(thenable);
+      // $FlowFixMe[method-unbinding]
+      const resolve = chunkCache.set.bind(chunkCache, chunkId, null);
+      thenable.then(resolve, ignoreReject);
+      chunkCache.set(chunkId, thenable);
+    } else if (entry !== null) {
+      promises.push(entry);
     }
+  }
+  if (isAsyncImport(metadata)) {
+    if (promises.length === 0) {
+      return requireAsyncModule(metadata[ID]);
+    } else {
+      return Promise.all(promises).then(() => {
+        return requireAsyncModule(metadata[ID]);
+      });
+    }
+  } else if (promises.length > 0) {
+    return Promise.all(promises);
+  } else {
+    return null;
+  }
 }
-var ReactDOMSharedInternals =
-    ReactDOM.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE,
-  REACT_ELEMENT_TYPE = Symbol.for("react.transitional.element"),
-  REACT_LAZY_TYPE = Symbol.for("react.lazy"),
-  MAYBE_ITERATOR_SYMBOL = Symbol.iterator;
+
+// Actually require the module or suspend if it's not yet ready.
+// Increase priority if necessary.
+function requireModule(metadata) {
+  let moduleExports = globalThis.__next_require__(metadata[ID]);
+  if (isAsyncImport(metadata)) {
+    if (typeof moduleExports.then !== 'function') ; else if (moduleExports.status === 'fulfilled') {
+      // This Promise should've been instrumented by preloadModule.
+      moduleExports = moduleExports.value;
+    } else {
+      throw moduleExports.reason;
+    }
+  }
+  if (metadata[NAME] === '*') {
+    // This is a placeholder value that represents that the caller imported this
+    // as a CommonJS module as is.
+    return moduleExports;
+  }
+  if (metadata[NAME] === '') {
+    // This is a placeholder value that represents that the caller accessed the
+    // default property of this if it was an ESM interop module.
+    return moduleExports.__esModule ? moduleExports.default : moduleExports;
+  }
+  if (hasOwnProperty.call(moduleExports, metadata[NAME])) {
+    return moduleExports[metadata[NAME]];
+  }
+  return undefined;
+}
+
+function loadChunk(chunkId, filename) {
+  return __webpack_chunk_load__(chunkId);
+}
+
+function prepareDestinationWithChunks(moduleLoading,
+// Chunks are double-indexed [..., idx, filenamex, idy, filenamey, ...]
+chunks, nonce) {
+  if (moduleLoading !== null) {
+    for (let i = 1; i < chunks.length; i += 2) {
+      preinitScriptForSSR(moduleLoading.prefix + chunks[i], nonce, moduleLoading.crossOrigin);
+    }
+  }
+}
+
+const ReactDOMSharedInternals = ReactDOM.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+
+function getCrossOriginString(input) {
+  if (typeof input === 'string') {
+    return input === 'use-credentials' ? input : '';
+  }
+  return undefined;
+}
+
+// This client file is in the shared folder because it applies to both SSR and browser contexts.
+// It is the configuration of the FlightClient behavior which can run in either environment.
+
+function dispatchHint(code, model) {
+  const dispatcher = ReactDOMSharedInternals.d; /* ReactDOMCurrentDispatcher */
+  switch (code) {
+    case 'D':
+      {
+        const refined = refineModel(code, model);
+        const href = refined;
+        dispatcher.D( /* prefetchDNS */href);
+        return;
+      }
+    case 'C':
+      {
+        const refined = refineModel(code, model);
+        if (typeof refined === 'string') {
+          const href = refined;
+          dispatcher.C( /* preconnect */href);
+        } else {
+          const href = refined[0];
+          const crossOrigin = refined[1];
+          dispatcher.C( /* preconnect */href, crossOrigin);
+        }
+        return;
+      }
+    case 'L':
+      {
+        const refined = refineModel(code, model);
+        const href = refined[0];
+        const as = refined[1];
+        if (refined.length === 3) {
+          const options = refined[2];
+          dispatcher.L( /* preload */href, as, options);
+        } else {
+          dispatcher.L( /* preload */href, as);
+        }
+        return;
+      }
+    case 'm':
+      {
+        const refined = refineModel(code, model);
+        if (typeof refined === 'string') {
+          const href = refined;
+          dispatcher.m( /* preloadModule */href);
+        } else {
+          const href = refined[0];
+          const options = refined[1];
+          dispatcher.m( /* preloadModule */href, options);
+        }
+        return;
+      }
+    case 'X':
+      {
+        const refined = refineModel(code, model);
+        if (typeof refined === 'string') {
+          const href = refined;
+          dispatcher.X( /* preinitScript */href);
+        } else {
+          const href = refined[0];
+          const options = refined[1];
+          dispatcher.X( /* preinitScript */href, options);
+        }
+        return;
+      }
+    case 'S':
+      {
+        const refined = refineModel(code, model);
+        if (typeof refined === 'string') {
+          const href = refined;
+          dispatcher.S( /* preinitStyle */href);
+        } else {
+          const href = refined[0];
+          const precedence = refined[1] === 0 ? undefined : refined[1];
+          const options = refined.length === 3 ? refined[2] : undefined;
+          dispatcher.S( /* preinitStyle */href, precedence, options);
+        }
+        return;
+      }
+    case 'M':
+      {
+        const refined = refineModel(code, model);
+        if (typeof refined === 'string') {
+          const href = refined;
+          dispatcher.M( /* preinitModuleScript */href);
+        } else {
+          const href = refined[0];
+          const options = refined[1];
+          dispatcher.M( /* preinitModuleScript */href, options);
+        }
+        return;
+      }
+  }
+}
+
+// Flow is having trouble refining the HintModels so we help it a bit.
+// This should be compiled out in the production build.
+function refineModel(code, model) {
+  return model;
+}
+function preinitScriptForSSR(href, nonce, crossOrigin) {
+  ReactDOMSharedInternals.d /* ReactDOMCurrentDispatcher */.X( /* preinitScript */href, {
+    crossOrigin: getCrossOriginString(crossOrigin),
+    nonce
+  });
+}
+
+const REACT_ELEMENT_TYPE = Symbol.for('react.transitional.element') ;
+const REACT_LAZY_TYPE = Symbol.for('react.lazy');
+const MAYBE_ITERATOR_SYMBOL = Symbol.iterator;
+const FAUX_ITERATOR_SYMBOL = '@@iterator';
 function getIteratorFn(maybeIterable) {
-  if (null === maybeIterable || "object" !== typeof maybeIterable) return null;
-  maybeIterable =
-    (MAYBE_ITERATOR_SYMBOL && maybeIterable[MAYBE_ITERATOR_SYMBOL]) ||
-    maybeIterable["@@iterator"];
-  return "function" === typeof maybeIterable ? maybeIterable : null;
+  if (maybeIterable === null || typeof maybeIterable !== 'object') {
+    return null;
+  }
+  const maybeIterator = MAYBE_ITERATOR_SYMBOL && maybeIterable[MAYBE_ITERATOR_SYMBOL] || maybeIterable[FAUX_ITERATOR_SYMBOL];
+  if (typeof maybeIterator === 'function') {
+    return maybeIterator;
+  }
+  return null;
 }
-var ASYNC_ITERATOR = Symbol.asyncIterator,
-  isArrayImpl = Array.isArray,
-  getPrototypeOf = Object.getPrototypeOf,
-  ObjectPrototype = Object.prototype,
-  knownServerReferences = new WeakMap();
+const ASYNC_ITERATOR = Symbol.asyncIterator;
+
+// This is actually a symbol but Flow doesn't support comparison of symbols to refine.
+// We use a boolean since in our code we often expect string (key) or number (index),
+// so by pretending to be a boolean we cover a lot of cases that don't consider this case.
+
+const isArrayImpl = Array.isArray;
+function isArray(a) {
+  return isArrayImpl(a);
+}
+
+const getPrototypeOf = Object.getPrototypeOf;
+
+function createTemporaryReferenceSet() {
+  return new Map();
+}
+function writeTemporaryReference(set, reference, object) {
+  set.set(reference, object);
+}
+function readTemporaryReference(set, reference) {
+  return set.get(reference);
+}
+
+const ObjectPrototype = Object.prototype;
+const knownServerReferences = new WeakMap();
+
+// Serializable values
+
+// Thenable<ReactServerValue>
+
+function serializeByValueID(id) {
+  return '$' + id.toString(16);
+}
+function serializePromiseID(id) {
+  return '$@' + id.toString(16);
+}
+function serializeServerReferenceID(id) {
+  return '$h' + id.toString(16);
+}
+function serializeTemporaryReferenceMarker() {
+  return '$T';
+}
+function serializeFormDataReference(id) {
+  return '$K' + id.toString(16);
+}
 function serializeNumber(number) {
-  return Number.isFinite(number)
-    ? 0 === number && -Infinity === 1 / number
-      ? "$-0"
-      : number
-    : Infinity === number
-      ? "$Infinity"
-      : -Infinity === number
-        ? "$-Infinity"
-        : "$NaN";
+  if (Number.isFinite(number)) {
+    if (number === 0 && 1 / number === -Infinity) {
+      return '$-0';
+    } else {
+      return number;
+    }
+  } else {
+    if (number === Infinity) {
+      return '$Infinity';
+    } else if (number === -Infinity) {
+      return '$-Infinity';
+    } else {
+      return '$NaN';
+    }
+  }
 }
-function processReply(
-  root,
-  formFieldPrefix,
-  temporaryReferences,
-  resolve,
-  reject
-) {
+function serializeUndefined() {
+  return '$undefined';
+}
+function serializeDateFromDateJSON(dateJSON) {
+  // JSON.stringify automatically calls Date.prototype.toJSON which calls toISOString.
+  // We need only tack on a $D prefix.
+  return '$D' + dateJSON;
+}
+function serializeBigInt(n) {
+  return '$n' + n.toString(10);
+}
+function serializeMapID(id) {
+  return '$Q' + id.toString(16);
+}
+function serializeSetID(id) {
+  return '$W' + id.toString(16);
+}
+function serializeBlobID(id) {
+  return '$B' + id.toString(16);
+}
+function serializeIteratorID(id) {
+  return '$i' + id.toString(16);
+}
+function escapeStringValue(value) {
+  if (value[0] === '$') {
+    // We need to escape $ prefixed strings since we use those to encode
+    // references to IDs and as special symbol values.
+    return '$' + value;
+  } else {
+    return value;
+  }
+}
+function processReply(root, formFieldPrefix, temporaryReferences, resolve, reject) {
+  let nextPartId = 1;
+  let pendingParts = 0;
+  let formData = null;
+  const writtenObjects = new WeakMap();
+  let modelRoot = root;
   function serializeTypedArray(tag, typedArray) {
-    typedArray = new Blob([
-      new Uint8Array(
-        typedArray.buffer,
-        typedArray.byteOffset,
-        typedArray.byteLength
-      )
-    ]);
-    var blobId = nextPartId++;
-    null === formData && (formData = new FormData());
-    formData.append(formFieldPrefix + blobId, typedArray);
-    return "$" + tag + blobId.toString(16);
+    const blob = new Blob([
+    // We should be able to pass the buffer straight through but Node < 18 treat
+    // multi-byte array blobs differently so we first convert it to single-byte.
+    new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength)]);
+    const blobId = nextPartId++;
+    if (formData === null) {
+      formData = new FormData();
+    }
+    formData.append(formFieldPrefix + blobId, blob);
+    return '$' + tag + blobId.toString(16);
   }
   function serializeBinaryReader(reader) {
-    function progress(entry) {
-      entry.done
-        ? ((entry = nextPartId++),
-          data.append(formFieldPrefix + entry, new Blob(buffer)),
-          data.append(
-            formFieldPrefix + streamId,
-            '"$o' + entry.toString(16) + '"'
-          ),
-          data.append(formFieldPrefix + streamId, "C"),
-          pendingParts--,
-          0 === pendingParts && resolve(data))
-        : (buffer.push(entry.value),
-          reader.read(new Uint8Array(1024)).then(progress, reject));
+    if (formData === null) {
+      // Upgrade to use FormData to allow us to stream this value.
+      formData = new FormData();
     }
-    null === formData && (formData = new FormData());
-    var data = formData;
+    const data = formData;
     pendingParts++;
-    var streamId = nextPartId++,
-      buffer = [];
+    const streamId = nextPartId++;
+    const buffer = [];
+    function progress(entry) {
+      if (entry.done) {
+        const blobId = nextPartId++;
+        data.append(formFieldPrefix + blobId, new Blob(buffer));
+        data.append(formFieldPrefix + streamId, '"$o' + blobId.toString(16) + '"');
+        data.append(formFieldPrefix + streamId, 'C'); // Close signal
+        pendingParts--;
+        if (pendingParts === 0) {
+          resolve(data);
+        }
+      } else {
+        buffer.push(entry.value);
+        reader.read(new Uint8Array(1024)).then(progress, reject);
+      }
+    }
     reader.read(new Uint8Array(1024)).then(progress, reject);
-    return "$r" + streamId.toString(16);
+    return '$r' + streamId.toString(16);
   }
   function serializeReader(reader) {
+    if (formData === null) {
+      // Upgrade to use FormData to allow us to stream this value.
+      formData = new FormData();
+    }
+    const data = formData;
+    pendingParts++;
+    const streamId = nextPartId++;
     function progress(entry) {
-      if (entry.done)
-        data.append(formFieldPrefix + streamId, "C"),
-          pendingParts--,
-          0 === pendingParts && resolve(data);
-      else
+      if (entry.done) {
+        data.append(formFieldPrefix + streamId, 'C'); // Close signal
+        pendingParts--;
+        if (pendingParts === 0) {
+          resolve(data);
+        }
+      } else {
         try {
-          var partJSON = JSON.stringify(entry.value, resolveToJSON);
+          // $FlowFixMe[incompatible-type]: While plain JSON can return undefined we never do here.
+          const partJSON = JSON.stringify(entry.value, resolveToJSON);
           data.append(formFieldPrefix + streamId, partJSON);
           reader.read().then(progress, reject);
         } catch (x) {
           reject(x);
         }
+      }
     }
-    null === formData && (formData = new FormData());
-    var data = formData;
-    pendingParts++;
-    var streamId = nextPartId++;
     reader.read().then(progress, reject);
-    return "$R" + streamId.toString(16);
+    return '$R' + streamId.toString(16);
   }
   function serializeReadableStream(stream) {
+    // Detect if this is a BYOB stream. BYOB streams should be able to be read as bytes on the
+    // receiving side. For binary streams, we serialize them as plain Blobs.
+    let binaryReader;
     try {
-      var binaryReader = stream.getReader({ mode: "byob" });
+      // $FlowFixMe[extra-arg]: This argument is accepted.
+      binaryReader = stream.getReader({
+        mode: 'byob'
+      });
     } catch (x) {
       return serializeReader(stream.getReader());
     }
     return serializeBinaryReader(binaryReader);
   }
   function serializeAsyncIterable(iterable, iterator) {
+    if (formData === null) {
+      // Upgrade to use FormData to allow us to stream this value.
+      formData = new FormData();
+    }
+    const data = formData;
+    pendingParts++;
+    const streamId = nextPartId++;
+
+    // Generators/Iterators are Iterables but they're also their own iterator
+    // functions. If that's the case, we treat them as single-shot. Otherwise,
+    // we assume that this iterable might be a multi-shot and allow it to be
+    // iterated more than once on the receiving server.
+    const isIterator = iterable === iterator;
+
+    // There's a race condition between when the stream is aborted and when the promise
+    // resolves so we track whether we already aborted it to avoid writing twice.
     function progress(entry) {
       if (entry.done) {
-        if (void 0 === entry.value)
-          data.append(formFieldPrefix + streamId, "C");
-        else
+        if (entry.value === undefined) {
+          data.append(formFieldPrefix + streamId, 'C'); // Close signal
+        } else {
+          // Unlike streams, the last value may not be undefined. If it's not
+          // we outline it and encode a reference to it in the closing instruction.
           try {
-            var partJSON = JSON.stringify(entry.value, resolveToJSON);
-            data.append(formFieldPrefix + streamId, "C" + partJSON);
+            // $FlowFixMe[incompatible-type]: While plain JSON can return undefined we never do here.
+            const partJSON = JSON.stringify(entry.value, resolveToJSON);
+            data.append(formFieldPrefix + streamId, 'C' + partJSON); // Close signal
           } catch (x) {
             reject(x);
             return;
           }
-        pendingParts--;
-        0 === pendingParts && resolve(data);
-      } else
-        try {
-          var partJSON$21 = JSON.stringify(entry.value, resolveToJSON);
-          data.append(formFieldPrefix + streamId, partJSON$21);
-          iterator.next().then(progress, reject);
-        } catch (x$22) {
-          reject(x$22);
         }
+        pendingParts--;
+        if (pendingParts === 0) {
+          resolve(data);
+        }
+      } else {
+        try {
+          // $FlowFixMe[incompatible-type]: While plain JSON can return undefined we never do here.
+          const partJSON = JSON.stringify(entry.value, resolveToJSON);
+          data.append(formFieldPrefix + streamId, partJSON);
+          iterator.next().then(progress, reject);
+        } catch (x) {
+          reject(x);
+          return;
+        }
+      }
     }
-    null === formData && (formData = new FormData());
-    var data = formData;
-    pendingParts++;
-    var streamId = nextPartId++;
-    iterable = iterable === iterator;
     iterator.next().then(progress, reject);
-    return "$" + (iterable ? "x" : "X") + streamId.toString(16);
+    return '$' + (isIterator ? 'x' : 'X') + streamId.toString(16);
   }
   function resolveToJSON(key, value) {
-    if (null === value) return null;
-    if ("object" === typeof value) {
+    const parent = this;
+    if (value === null) {
+      return null;
+    }
+    if (typeof value === 'object') {
       switch (value.$$typeof) {
         case REACT_ELEMENT_TYPE:
-          if (void 0 !== temporaryReferences && -1 === key.indexOf(":")) {
-            var parentReference = writtenObjects.get(this);
-            if (void 0 !== parentReference)
-              return (
-                temporaryReferences.set(parentReference + ":" + key, value),
-                "$T"
-              );
-          }
-          throw Error(
-            "React Element cannot be passed to Server Functions from the Client without a temporary reference set. Pass a TemporaryReferenceSet to the options."
-          );
-        case REACT_LAZY_TYPE:
-          parentReference = value._payload;
-          var init = value._init;
-          null === formData && (formData = new FormData());
-          pendingParts++;
-          try {
-            var resolvedModel = init(parentReference),
-              lazyId = nextPartId++,
-              partJSON = serializeModel(resolvedModel, lazyId);
-            formData.append(formFieldPrefix + lazyId, partJSON);
-            return "$" + lazyId.toString(16);
-          } catch (x) {
-            if (
-              "object" === typeof x &&
-              null !== x &&
-              "function" === typeof x.then
-            ) {
-              pendingParts++;
-              var lazyId$23 = nextPartId++;
-              parentReference = function () {
-                try {
-                  var partJSON$24 = serializeModel(value, lazyId$23),
-                    data$25 = formData;
-                  data$25.append(formFieldPrefix + lazyId$23, partJSON$24);
-                  pendingParts--;
-                  0 === pendingParts && resolve(data$25);
-                } catch (reason) {
-                  reject(reason);
-                }
-              };
-              x.then(parentReference, parentReference);
-              return "$" + lazyId$23.toString(16);
+          {
+            if (temporaryReferences !== undefined && key.indexOf(':') === -1) {
+              // TODO: If the property name contains a colon, we don't dedupe. Escape instead.
+              const parentReference = writtenObjects.get(parent);
+              if (parentReference !== undefined) {
+                // If the parent has a reference, we can refer to this object indirectly
+                // through the property name inside that parent.
+                const reference = parentReference + ':' + key;
+                // Store this object so that the server can refer to it later in responses.
+                writeTemporaryReference(temporaryReferences, reference, value);
+                return serializeTemporaryReferenceMarker();
+              }
             }
-            reject(x);
-            return null;
-          } finally {
-            pendingParts--;
+            throw new Error('React Element cannot be passed to Server Functions from the Client without a ' + 'temporary reference set. Pass a TemporaryReferenceSet to the options.' + (''));
+          }
+        case REACT_LAZY_TYPE:
+          {
+            // Resolve lazy as if it wasn't here. In the future this will be encoded as a Promise.
+            const lazy = value;
+            const payload = lazy._payload;
+            const init = lazy._init;
+            if (formData === null) {
+              // Upgrade to use FormData to allow us to stream this value.
+              formData = new FormData();
+            }
+            pendingParts++;
+            try {
+              const resolvedModel = init(payload);
+              // We always outline this as a separate part even though we could inline it
+              // because it ensures a more deterministic encoding.
+              const lazyId = nextPartId++;
+              const partJSON = serializeModel(resolvedModel, lazyId);
+              // $FlowFixMe[incompatible-type] We know it's not null because we assigned it above.
+              const data = formData;
+              data.append(formFieldPrefix + lazyId, partJSON);
+              return serializeByValueID(lazyId);
+            } catch (x) {
+              if (typeof x === 'object' && x !== null && typeof x.then === 'function') {
+                // Suspended
+                pendingParts++;
+                const lazyId = nextPartId++;
+                const thenable = x;
+                const retry = function () {
+                  // While the first promise resolved, its value isn't necessarily what we'll
+                  // resolve into because we might suspend again.
+                  try {
+                    const partJSON = serializeModel(value, lazyId);
+                    // $FlowFixMe[incompatible-type] We know it's not null because we assigned it above.
+                    const data = formData;
+                    data.append(formFieldPrefix + lazyId, partJSON);
+                    pendingParts--;
+                    if (pendingParts === 0) {
+                      resolve(data);
+                    }
+                  } catch (reason) {
+                    reject(reason);
+                  }
+                };
+                thenable.then(retry, retry);
+                return serializeByValueID(lazyId);
+              } else {
+                // In the future we could consider serializing this as an error
+                // that throws on the server instead.
+                reject(x);
+                return null;
+              }
+            } finally {
+              pendingParts--;
+            }
           }
       }
-      parentReference = writtenObjects.get(value);
-      if ("function" === typeof value.then) {
-        if (void 0 !== parentReference)
-          if (modelRoot === value) modelRoot = null;
-          else return parentReference;
-        null === formData && (formData = new FormData());
+      const existingReference = writtenObjects.get(value);
+
+      // $FlowFixMe[method-unbinding]
+      if (typeof value.then === 'function') {
+        if (existingReference !== undefined) {
+          if (modelRoot === value) {
+            // This is the ID we're currently emitting so we need to write it
+            // once but if we discover it again, we refer to it by id.
+            modelRoot = null;
+          } else {
+            // We've already emitted this as an outlined object, so we can
+            // just refer to that by its existing ID.
+            return existingReference;
+          }
+        }
+
+        // We assume that any object with a .then property is a "Thenable" type,
+        // or a Promise type. Either of which can be represented by a Promise.
+        if (formData === null) {
+          // Upgrade to use FormData to allow us to stream this value.
+          formData = new FormData();
+        }
         pendingParts++;
-        var promiseId = nextPartId++;
-        key = "$@" + promiseId.toString(16);
-        writtenObjects.set(value, key);
-        value.then(function (partValue) {
+        const promiseId = nextPartId++;
+        const promiseReference = serializePromiseID(promiseId);
+        writtenObjects.set(value, promiseReference);
+        const thenable = value;
+        thenable.then(partValue => {
           try {
-            var previousReference = writtenObjects.get(partValue);
-            var partJSON$27 =
-              void 0 !== previousReference
-                ? JSON.stringify(previousReference)
-                : serializeModel(partValue, promiseId);
-            partValue = formData;
-            partValue.append(formFieldPrefix + promiseId, partJSON$27);
+            const previousReference = writtenObjects.get(partValue);
+            let partJSON;
+            if (previousReference !== undefined) {
+              partJSON = JSON.stringify(previousReference);
+            } else {
+              partJSON = serializeModel(partValue, promiseId);
+            }
+            // $FlowFixMe[incompatible-type] We know it's not null because we assigned it above.
+            const data = formData;
+            data.append(formFieldPrefix + promiseId, partJSON);
             pendingParts--;
-            0 === pendingParts && resolve(partValue);
+            if (pendingParts === 0) {
+              resolve(data);
+            }
           } catch (reason) {
             reject(reason);
           }
-        }, reject);
-        return key;
+        },
+        // In the future we could consider serializing this as an error
+        // that throws on the server instead.
+        reject);
+        return promiseReference;
       }
-      if (void 0 !== parentReference)
-        if (modelRoot === value) modelRoot = null;
-        else return parentReference;
-      else
-        -1 === key.indexOf(":") &&
-          ((parentReference = writtenObjects.get(this)),
-          void 0 !== parentReference &&
-            ((key = parentReference + ":" + key),
-            writtenObjects.set(value, key),
-            void 0 !== temporaryReferences &&
-              temporaryReferences.set(key, value)));
-      if (isArrayImpl(value)) return value;
+      if (existingReference !== undefined) {
+        if (modelRoot === value) {
+          // This is the ID we're currently emitting so we need to write it
+          // once but if we discover it again, we refer to it by id.
+          modelRoot = null;
+        } else {
+          // We've already emitted this as an outlined object, so we can
+          // just refer to that by its existing ID.
+          return existingReference;
+        }
+      } else if (key.indexOf(':') === -1) {
+        // TODO: If the property name contains a colon, we don't dedupe. Escape instead.
+        const parentReference = writtenObjects.get(parent);
+        if (parentReference !== undefined) {
+          // If the parent has a reference, we can refer to this object indirectly
+          // through the property name inside that parent.
+          const reference = parentReference + ':' + key;
+          writtenObjects.set(value, reference);
+          if (temporaryReferences !== undefined) {
+            // Store this object so that the server can refer to it later in responses.
+            writeTemporaryReference(temporaryReferences, reference, value);
+          }
+        }
+      }
+      if (isArray(value)) {
+        // $FlowFixMe[incompatible-return]
+        return value;
+      }
+      // TODO: Should we the Object.prototype.toString.call() to test for cross-realm objects?
       if (value instanceof FormData) {
-        null === formData && (formData = new FormData());
-        var data$31 = formData;
-        key = nextPartId++;
-        var prefix = formFieldPrefix + key + "_";
-        value.forEach(function (originalValue, originalKey) {
-          data$31.append(prefix + originalKey, originalValue);
+        if (formData === null) {
+          // Upgrade to use FormData to allow us to use rich objects as its values.
+          formData = new FormData();
+        }
+        const data = formData;
+        const refId = nextPartId++;
+        // Copy all the form fields with a prefix for this reference.
+        // These must come first in the form order because we assume that all the
+        // fields are available before this is referenced.
+        const prefix = formFieldPrefix + refId + '_';
+        // $FlowFixMe[prop-missing]: FormData has forEach.
+        value.forEach((originalValue, originalKey) => {
+          // $FlowFixMe[incompatible-call]
+          data.append(prefix + originalKey, originalValue);
         });
-        return "$K" + key.toString(16);
+        return serializeFormDataReference(refId);
       }
-      if (value instanceof Map)
-        return (
-          (key = nextPartId++),
-          (parentReference = serializeModel(Array.from(value), key)),
-          null === formData && (formData = new FormData()),
-          formData.append(formFieldPrefix + key, parentReference),
-          "$Q" + key.toString(16)
-        );
-      if (value instanceof Set)
-        return (
-          (key = nextPartId++),
-          (parentReference = serializeModel(Array.from(value), key)),
-          null === formData && (formData = new FormData()),
-          formData.append(formFieldPrefix + key, parentReference),
-          "$W" + key.toString(16)
-        );
-      if (value instanceof ArrayBuffer)
-        return (
-          (key = new Blob([value])),
-          (parentReference = nextPartId++),
-          null === formData && (formData = new FormData()),
-          formData.append(formFieldPrefix + parentReference, key),
-          "$A" + parentReference.toString(16)
-        );
-      if (value instanceof Int8Array) return serializeTypedArray("O", value);
-      if (value instanceof Uint8Array) return serializeTypedArray("o", value);
-      if (value instanceof Uint8ClampedArray)
-        return serializeTypedArray("U", value);
-      if (value instanceof Int16Array) return serializeTypedArray("S", value);
-      if (value instanceof Uint16Array) return serializeTypedArray("s", value);
-      if (value instanceof Int32Array) return serializeTypedArray("L", value);
-      if (value instanceof Uint32Array) return serializeTypedArray("l", value);
-      if (value instanceof Float32Array) return serializeTypedArray("G", value);
-      if (value instanceof Float64Array) return serializeTypedArray("g", value);
-      if (value instanceof BigInt64Array)
-        return serializeTypedArray("M", value);
-      if (value instanceof BigUint64Array)
-        return serializeTypedArray("m", value);
-      if (value instanceof DataView) return serializeTypedArray("V", value);
-      if ("function" === typeof Blob && value instanceof Blob)
-        return (
-          null === formData && (formData = new FormData()),
-          (key = nextPartId++),
-          formData.append(formFieldPrefix + key, value),
-          "$B" + key.toString(16)
-        );
-      if ((key = getIteratorFn(value)))
-        return (
-          (parentReference = key.call(value)),
-          parentReference === value
-            ? ((key = nextPartId++),
-              (parentReference = serializeModel(
-                Array.from(parentReference),
-                key
-              )),
-              null === formData && (formData = new FormData()),
-              formData.append(formFieldPrefix + key, parentReference),
-              "$i" + key.toString(16))
-            : Array.from(parentReference)
-        );
-      if (
-        "function" === typeof ReadableStream &&
-        value instanceof ReadableStream
-      )
+      if (value instanceof Map) {
+        const mapId = nextPartId++;
+        const partJSON = serializeModel(Array.from(value), mapId);
+        if (formData === null) {
+          formData = new FormData();
+        }
+        formData.append(formFieldPrefix + mapId, partJSON);
+        return serializeMapID(mapId);
+      }
+      if (value instanceof Set) {
+        const setId = nextPartId++;
+        const partJSON = serializeModel(Array.from(value), setId);
+        if (formData === null) {
+          formData = new FormData();
+        }
+        formData.append(formFieldPrefix + setId, partJSON);
+        return serializeSetID(setId);
+      }
+      if (value instanceof ArrayBuffer) {
+        const blob = new Blob([value]);
+        const blobId = nextPartId++;
+        if (formData === null) {
+          formData = new FormData();
+        }
+        formData.append(formFieldPrefix + blobId, blob);
+        return '$' + 'A' + blobId.toString(16);
+      }
+      if (value instanceof Int8Array) {
+        // char
+        return serializeTypedArray('O', value);
+      }
+      if (value instanceof Uint8Array) {
+        // unsigned char
+        return serializeTypedArray('o', value);
+      }
+      if (value instanceof Uint8ClampedArray) {
+        // unsigned clamped char
+        return serializeTypedArray('U', value);
+      }
+      if (value instanceof Int16Array) {
+        // sort
+        return serializeTypedArray('S', value);
+      }
+      if (value instanceof Uint16Array) {
+        // unsigned short
+        return serializeTypedArray('s', value);
+      }
+      if (value instanceof Int32Array) {
+        // long
+        return serializeTypedArray('L', value);
+      }
+      if (value instanceof Uint32Array) {
+        // unsigned long
+        return serializeTypedArray('l', value);
+      }
+      if (value instanceof Float32Array) {
+        // float
+        return serializeTypedArray('G', value);
+      }
+      if (value instanceof Float64Array) {
+        // double
+        return serializeTypedArray('g', value);
+      }
+      if (value instanceof BigInt64Array) {
+        // number
+        return serializeTypedArray('M', value);
+      }
+      if (value instanceof BigUint64Array) {
+        // unsigned number
+        // We use "m" instead of "n" since JSON can start with "null"
+        return serializeTypedArray('m', value);
+      }
+      if (value instanceof DataView) {
+        return serializeTypedArray('V', value);
+      }
+      // TODO: Blob is not available in old Node/browsers. Remove the typeof check later.
+      if (typeof Blob === 'function' && value instanceof Blob) {
+        if (formData === null) {
+          formData = new FormData();
+        }
+        const blobId = nextPartId++;
+        formData.append(formFieldPrefix + blobId, value);
+        return serializeBlobID(blobId);
+      }
+      const iteratorFn = getIteratorFn(value);
+      if (iteratorFn) {
+        const iterator = iteratorFn.call(value);
+        if (iterator === value) {
+          // Iterator, not Iterable
+          const iteratorId = nextPartId++;
+          const partJSON = serializeModel(Array.from(iterator), iteratorId);
+          if (formData === null) {
+            formData = new FormData();
+          }
+          formData.append(formFieldPrefix + iteratorId, partJSON);
+          return serializeIteratorID(iteratorId);
+        }
+        return Array.from(iterator);
+      }
+
+      // TODO: ReadableStream is not available in old Node. Remove the typeof check later.
+      if (typeof ReadableStream === 'function' && value instanceof ReadableStream) {
         return serializeReadableStream(value);
-      key = value[ASYNC_ITERATOR];
-      if ("function" === typeof key)
-        return serializeAsyncIterable(value, key.call(value));
-      key = getPrototypeOf(value);
-      if (
-        key !== ObjectPrototype &&
-        (null === key || null !== getPrototypeOf(key))
-      ) {
-        if (void 0 === temporaryReferences)
-          throw Error(
-            "Only plain objects, and a few built-ins, can be passed to Server Functions. Classes or null prototypes are not supported."
-          );
-        return "$T";
       }
+      const getAsyncIterator = value[ASYNC_ITERATOR];
+      if (typeof getAsyncIterator === 'function') {
+        // We treat AsyncIterables as a Fragment and as such we might need to key them.
+        return serializeAsyncIterable(value, getAsyncIterator.call(value));
+      }
+
+      // Verify that this is a simple plain object.
+      const proto = getPrototypeOf(value);
+      if (proto !== ObjectPrototype && (proto === null || getPrototypeOf(proto) !== null)) {
+        if (temporaryReferences === undefined) {
+          throw new Error('Only plain objects, and a few built-ins, can be passed to Server Functions. ' + 'Classes or null prototypes are not supported.' + (''));
+        }
+        // We will have written this object to the temporary reference set above
+        // so we can replace it with a marker to refer to this slot later.
+        return serializeTemporaryReferenceMarker();
+      }
+
+      // $FlowFixMe[incompatible-return]
       return value;
     }
-    if ("string" === typeof value) {
-      if ("Z" === value[value.length - 1] && this[key] instanceof Date)
-        return "$D" + value;
-      key = "$" === value[0] ? "$" + value : value;
-      return key;
+    if (typeof value === 'string') {
+      // TODO: Maybe too clever. If we support URL there's no similar trick.
+      if (value[value.length - 1] === 'Z') {
+        // Possibly a Date, whose toJSON automatically calls toISOString
+        // $FlowFixMe[incompatible-use]
+        const originalValue = parent[key];
+        if (originalValue instanceof Date) {
+          return serializeDateFromDateJSON(value);
+        }
+      }
+      return escapeStringValue(value);
     }
-    if ("boolean" === typeof value) return value;
-    if ("number" === typeof value) return serializeNumber(value);
-    if ("undefined" === typeof value) return "$undefined";
-    if ("function" === typeof value) {
-      parentReference = knownServerReferences.get(value);
-      if (void 0 !== parentReference)
-        return (
-          (key = JSON.stringify(
-            { id: parentReference.id, bound: parentReference.bound },
-            resolveToJSON
-          )),
-          null === formData && (formData = new FormData()),
-          (parentReference = nextPartId++),
-          formData.set(formFieldPrefix + parentReference, key),
-          "$h" + parentReference.toString(16)
-        );
-      if (
-        void 0 !== temporaryReferences &&
-        -1 === key.indexOf(":") &&
-        ((parentReference = writtenObjects.get(this)),
-        void 0 !== parentReference)
-      )
-        return (
-          temporaryReferences.set(parentReference + ":" + key, value), "$T"
-        );
-      throw Error(
-        "Client Functions cannot be passed directly to Server Functions. Only Functions passed from the Server can be passed back again."
-      );
+    if (typeof value === 'boolean') {
+      return value;
     }
-    if ("symbol" === typeof value) {
-      if (
-        void 0 !== temporaryReferences &&
-        -1 === key.indexOf(":") &&
-        ((parentReference = writtenObjects.get(this)),
-        void 0 !== parentReference)
-      )
-        return (
-          temporaryReferences.set(parentReference + ":" + key, value), "$T"
-        );
-      throw Error(
-        "Symbols cannot be passed to a Server Function without a temporary reference set. Pass a TemporaryReferenceSet to the options."
-      );
+    if (typeof value === 'number') {
+      return serializeNumber(value);
     }
-    if ("bigint" === typeof value) return "$n" + value.toString(10);
-    throw Error(
-      "Type " +
-        typeof value +
-        " is not supported as an argument to a Server Function."
-    );
+    if (typeof value === 'undefined') {
+      return serializeUndefined();
+    }
+    if (typeof value === 'function') {
+      const referenceClosure = knownServerReferences.get(value);
+      if (referenceClosure !== undefined) {
+        const id = referenceClosure.id,
+          bound = referenceClosure.bound;
+        const referenceClosureJSON = JSON.stringify({
+          id,
+          bound
+        }, resolveToJSON);
+        if (formData === null) {
+          // Upgrade to use FormData to allow us to stream this value.
+          formData = new FormData();
+        }
+        // The reference to this function came from the same client so we can pass it back.
+        const refId = nextPartId++;
+        formData.set(formFieldPrefix + refId, referenceClosureJSON);
+        return serializeServerReferenceID(refId);
+      }
+      if (temporaryReferences !== undefined && key.indexOf(':') === -1) {
+        // TODO: If the property name contains a colon, we don't dedupe. Escape instead.
+        const parentReference = writtenObjects.get(parent);
+        if (parentReference !== undefined) {
+          // If the parent has a reference, we can refer to this object indirectly
+          // through the property name inside that parent.
+          const reference = parentReference + ':' + key;
+          // Store this object so that the server can refer to it later in responses.
+          writeTemporaryReference(temporaryReferences, reference, value);
+          return serializeTemporaryReferenceMarker();
+        }
+      }
+      throw new Error('Client Functions cannot be passed directly to Server Functions. ' + 'Only Functions passed from the Server can be passed back again.');
+    }
+    if (typeof value === 'symbol') {
+      if (temporaryReferences !== undefined && key.indexOf(':') === -1) {
+        // TODO: If the property name contains a colon, we don't dedupe. Escape instead.
+        const parentReference = writtenObjects.get(parent);
+        if (parentReference !== undefined) {
+          // If the parent has a reference, we can refer to this object indirectly
+          // through the property name inside that parent.
+          const reference = parentReference + ':' + key;
+          // Store this object so that the server can refer to it later in responses.
+          writeTemporaryReference(temporaryReferences, reference, value);
+          return serializeTemporaryReferenceMarker();
+        }
+      }
+      throw new Error('Symbols cannot be passed to a Server Function without a ' + 'temporary reference set. Pass a TemporaryReferenceSet to the options.' + (''));
+    }
+    if (typeof value === 'bigint') {
+      return serializeBigInt(value);
+    }
+    throw new Error("Type " + typeof value + " is not supported as an argument to a Server Function.");
   }
   function serializeModel(model, id) {
-    "object" === typeof model &&
-      null !== model &&
-      ((id = "$" + id.toString(16)),
-      writtenObjects.set(model, id),
-      void 0 !== temporaryReferences && temporaryReferences.set(id, model));
+    if (typeof model === 'object' && model !== null) {
+      const reference = serializeByValueID(id);
+      writtenObjects.set(model, reference);
+      if (temporaryReferences !== undefined) {
+        // Store this object so that the server can refer to it later in responses.
+        writeTemporaryReference(temporaryReferences, reference, model);
+      }
+    }
     modelRoot = model;
+    // $FlowFixMe[incompatible-return] it's not going to be undefined because we'll encode it.
     return JSON.stringify(model, resolveToJSON);
   }
-  var nextPartId = 1,
-    pendingParts = 0,
-    formData = null,
-    writtenObjects = new WeakMap(),
-    modelRoot = root,
-    json = serializeModel(root, 0);
-  null === formData
-    ? resolve(json)
-    : (formData.set(formFieldPrefix + "0", json),
-      0 === pendingParts && resolve(formData));
-  return function () {
-    0 < pendingParts &&
-      ((pendingParts = 0),
-      null === formData ? resolve(json) : resolve(formData));
-  };
-}
-var boundCache = new WeakMap();
-function encodeFormData(reference) {
-  var resolve,
-    reject,
-    thenable = new Promise(function (res, rej) {
-      resolve = res;
-      reject = rej;
-    });
-  processReply(
-    reference,
-    "",
-    void 0,
-    function (body) {
-      if ("string" === typeof body) {
-        var data = new FormData();
-        data.append("0", body);
-        body = data;
+  function abort(reason) {
+    if (pendingParts > 0) {
+      pendingParts = 0; // Don't resolve again later.
+      // Resolve with what we have so far, which may have holes at this point.
+      // They'll error when the stream completes on the server.
+      if (formData === null) {
+        resolve(json);
+      } else {
+        resolve(formData);
       }
-      thenable.status = "fulfilled";
-      thenable.value = body;
-      resolve(body);
-    },
-    function (e) {
-      thenable.status = "rejected";
-      thenable.reason = e;
-      reject(e);
     }
-  );
+  }
+  const json = serializeModel(root, 0);
+  if (formData === null) {
+    // If it's a simple data structure, we just use plain JSON.
+    resolve(json);
+  } else {
+    // Otherwise, we use FormData to let us stream in the result.
+    formData.set(formFieldPrefix + '0', json);
+    if (pendingParts === 0) {
+      // $FlowFixMe[incompatible-call] this has already been refined.
+      resolve(formData);
+    }
+  }
+  return abort;
+}
+const boundCache = new WeakMap();
+function encodeFormData(reference) {
+  let resolve, reject;
+  // We need to have a handle on the thenable so that we can synchronously set
+  // its status from processReply, when it can complete synchronously.
+  const thenable = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  processReply(reference, '', undefined,
+  // TODO: This means React Elements can't be used as state in progressive enhancement.
+  body => {
+    if (typeof body === 'string') {
+      const data = new FormData();
+      data.append('0', body);
+      body = data;
+    }
+    const fulfilled = thenable;
+    fulfilled.status = 'fulfilled';
+    fulfilled.value = body;
+    resolve(body);
+  }, e => {
+    const rejected = thenable;
+    rejected.status = 'rejected';
+    rejected.reason = e;
+    reject(e);
+  });
   return thenable;
 }
 function defaultEncodeFormAction(identifierPrefix) {
-  var referenceClosure = knownServerReferences.get(this);
-  if (!referenceClosure)
-    throw Error(
-      "Tried to encode a Server Action from a different instance than the encoder is from. This is a bug in React."
-    );
-  var data = null;
-  if (null !== referenceClosure.bound) {
-    data = boundCache.get(referenceClosure);
-    data ||
-      ((data = encodeFormData({
-        id: referenceClosure.id,
-        bound: referenceClosure.bound
-      })),
-      boundCache.set(referenceClosure, data));
-    if ("rejected" === data.status) throw data.reason;
-    if ("fulfilled" !== data.status) throw data;
-    referenceClosure = data.value;
-    var prefixedData = new FormData();
-    referenceClosure.forEach(function (value, key) {
-      prefixedData.append("$ACTION_" + identifierPrefix + ":" + key, value);
+  const referenceClosure = knownServerReferences.get(this);
+  if (!referenceClosure) {
+    throw new Error('Tried to encode a Server Action from a different instance than the encoder is from. ' + 'This is a bug in React.');
+  }
+  let data = null;
+  let name;
+  const boundPromise = referenceClosure.bound;
+  if (boundPromise !== null) {
+    let thenable = boundCache.get(referenceClosure);
+    if (!thenable) {
+      const id = referenceClosure.id,
+        bound = referenceClosure.bound;
+      thenable = encodeFormData({
+        id,
+        bound
+      });
+      boundCache.set(referenceClosure, thenable);
+    }
+    if (thenable.status === 'rejected') {
+      throw thenable.reason;
+    } else if (thenable.status !== 'fulfilled') {
+      throw thenable;
+    }
+    const encodedFormData = thenable.value;
+    // This is hacky but we need the identifier prefix to be added to
+    // all fields but the suspense cache would break since we might get
+    // a new identifier each time. So we just append it at the end instead.
+    const prefixedData = new FormData();
+    // $FlowFixMe[prop-missing]
+    encodedFormData.forEach((value, key) => {
+      // $FlowFixMe[incompatible-call]
+      prefixedData.append('$ACTION_' + identifierPrefix + ':' + key, value);
     });
     data = prefixedData;
-    referenceClosure = "$ACTION_REF_" + identifierPrefix;
-  } else referenceClosure = "$ACTION_ID_" + referenceClosure.id;
+    // We encode the name of the prefix containing the data.
+    name = '$ACTION_REF_' + identifierPrefix;
+  } else {
+    // This is the simple case so we can just encode the ID.
+    name = '$ACTION_ID_' + referenceClosure.id;
+  }
   return {
-    name: referenceClosure,
-    method: "POST",
-    encType: "multipart/form-data",
+    name: name,
+    method: 'POST',
+    encType: 'multipart/form-data',
     data: data
   };
 }
+function customEncodeFormAction(reference, identifierPrefix, encodeFormAction) {
+  const referenceClosure = knownServerReferences.get(reference);
+  if (!referenceClosure) {
+    throw new Error('Tried to encode a Server Action from a different instance than the encoder is from. ' + 'This is a bug in React.');
+  }
+  let boundPromise = referenceClosure.bound;
+  if (boundPromise === null) {
+    boundPromise = Promise.resolve([]);
+  }
+  return encodeFormAction(referenceClosure.id, boundPromise);
+}
 function isSignatureEqual(referenceId, numberOfBoundArgs) {
-  var referenceClosure = knownServerReferences.get(this);
-  if (!referenceClosure)
-    throw Error(
-      "Tried to encode a Server Action from a different instance than the encoder is from. This is a bug in React."
-    );
-  if (referenceClosure.id !== referenceId) return !1;
-  var boundPromise = referenceClosure.bound;
-  if (null === boundPromise) return 0 === numberOfBoundArgs;
+  const referenceClosure = knownServerReferences.get(this);
+  if (!referenceClosure) {
+    throw new Error('Tried to encode a Server Action from a different instance than the encoder is from. ' + 'This is a bug in React.');
+  }
+  if (referenceClosure.id !== referenceId) {
+    // These are different functions.
+    return false;
+  }
+  // Now check if the number of bound arguments is the same.
+  const boundPromise = referenceClosure.bound;
+  if (boundPromise === null) {
+    // No bound arguments.
+    return numberOfBoundArgs === 0;
+  }
+  // Unwrap the bound arguments array by suspending, if necessary. As with
+  // encodeFormData, this means isSignatureEqual can only be called while React
+  // is rendering.
   switch (boundPromise.status) {
-    case "fulfilled":
-      return boundPromise.value.length === numberOfBoundArgs;
-    case "pending":
-      throw boundPromise;
-    case "rejected":
-      throw boundPromise.reason;
+    case 'fulfilled':
+      {
+        const boundArgs = boundPromise.value;
+        return boundArgs.length === numberOfBoundArgs;
+      }
+    case 'pending':
+      {
+        throw boundPromise;
+      }
+    case 'rejected':
+      {
+        throw boundPromise.reason;
+      }
     default:
-      throw (
-        ("string" !== typeof boundPromise.status &&
-          ((boundPromise.status = "pending"),
-          boundPromise.then(
-            function (boundArgs) {
-              boundPromise.status = "fulfilled";
-              boundPromise.value = boundArgs;
-            },
-            function (error) {
-              boundPromise.status = "rejected";
-              boundPromise.reason = error;
-            }
-          )),
-        boundPromise)
-      );
+      {
+        if (typeof boundPromise.status === 'string') ; else {
+          const pendingThenable = boundPromise;
+          pendingThenable.status = 'pending';
+          pendingThenable.then(boundArgs => {
+            const fulfilledThenable = boundPromise;
+            fulfilledThenable.status = 'fulfilled';
+            fulfilledThenable.value = boundArgs;
+          }, error => {
+            const rejectedThenable = boundPromise;
+            rejectedThenable.status = 'rejected';
+            rejectedThenable.reason = error;
+          });
+        }
+        throw boundPromise;
+      }
   }
 }
 function registerBoundServerReference(reference, id, bound, encodeFormAction) {
-  knownServerReferences.has(reference) ||
-    (knownServerReferences.set(reference, {
-      id: id,
-      originalBind: reference.bind,
-      bound: bound
-    }),
+  if (knownServerReferences.has(reference)) {
+    return;
+  }
+  knownServerReferences.set(reference, {
+    id,
+    originalBind: reference.bind,
+    bound
+  });
+
+  // Expose encoder for use by SSR, as well as a special bind that can be used to
+  // keep server capabilities.
+  {
+    // Only expose this in builds that would actually use it. Not needed in the browser.
+    const $$FORM_ACTION = encodeFormAction === undefined ? defaultEncodeFormAction : function (identifierPrefix) {
+      return customEncodeFormAction(this, identifierPrefix, encodeFormAction);
+    };
     Object.defineProperties(reference, {
       $$FORM_ACTION: {
-        value:
-          void 0 === encodeFormAction
-            ? defaultEncodeFormAction
-            : function () {
-                var referenceClosure = knownServerReferences.get(this);
-                if (!referenceClosure)
-                  throw Error(
-                    "Tried to encode a Server Action from a different instance than the encoder is from. This is a bug in React."
-                  );
-                var boundPromise = referenceClosure.bound;
-                null === boundPromise && (boundPromise = Promise.resolve([]));
-                return encodeFormAction(referenceClosure.id, boundPromise);
-              }
+        value: $$FORM_ACTION
       },
-      $$IS_SIGNATURE_EQUAL: { value: isSignatureEqual },
-      bind: { value: bind }
-    }));
+      $$IS_SIGNATURE_EQUAL: {
+        value: isSignatureEqual
+      },
+      bind: {
+        value: bind
+      }
+    });
+  }
 }
-var FunctionBind = Function.prototype.bind,
-  ArraySlice = Array.prototype.slice;
+function registerServerReference(reference, id, encodeFormAction) {
+  registerBoundServerReference(reference, id, null, encodeFormAction);
+  return reference;
+}
+
+// $FlowFixMe[method-unbinding]
+const FunctionBind = Function.prototype.bind;
+// $FlowFixMe[method-unbinding]
+const ArraySlice = Array.prototype.slice;
 function bind() {
-  var referenceClosure = knownServerReferences.get(this);
-  if (!referenceClosure) return FunctionBind.apply(this, arguments);
-  var newFn = referenceClosure.originalBind.apply(this, arguments),
-    args = ArraySlice.call(arguments, 1),
-    boundPromise = null;
-  boundPromise =
-    null !== referenceClosure.bound
-      ? Promise.resolve(referenceClosure.bound).then(function (boundArgs) {
-          return boundArgs.concat(args);
-        })
-      : Promise.resolve(args);
+  const referenceClosure = knownServerReferences.get(this);
+  if (!referenceClosure) {
+    // $FlowFixMe[incompatible-call]
+    return FunctionBind.apply(this, arguments);
+  }
+  const newFn = referenceClosure.originalBind.apply(this, arguments);
+  const args = ArraySlice.call(arguments, 1);
+  let boundPromise = null;
+  if (referenceClosure.bound !== null) {
+    boundPromise = Promise.resolve(referenceClosure.bound).then(boundArgs => boundArgs.concat(args));
+  } else {
+    boundPromise = Promise.resolve(args);
+  }
   knownServerReferences.set(newFn, {
     id: referenceClosure.id,
     originalBind: newFn.bind,
     bound: boundPromise
   });
-  Object.defineProperties(newFn, {
-    $$FORM_ACTION: { value: this.$$FORM_ACTION },
-    $$IS_SIGNATURE_EQUAL: { value: isSignatureEqual },
-    bind: { value: bind }
-  });
+
+  // Expose encoder for use by SSR, as well as a special bind that can be used to
+  // keep server capabilities.
+  {
+    // Only expose this in builds that would actually use it. Not needed on the client.
+    Object.defineProperties(newFn, {
+      $$FORM_ACTION: {
+        value: this.$$FORM_ACTION
+      },
+      $$IS_SIGNATURE_EQUAL: {
+        value: isSignatureEqual
+      },
+      bind: {
+        value: bind
+      }
+    });
+  }
   return newFn;
 }
-function createBoundServerReference(metaData, callServer, encodeFormAction) {
-  function action() {
-    var args = Array.prototype.slice.call(arguments);
-    return bound
-      ? "fulfilled" === bound.status
-        ? callServer(id, bound.value.concat(args))
-        : Promise.resolve(bound).then(function (boundArgs) {
-            return callServer(id, boundArgs.concat(args));
-          })
-      : callServer(id, args);
-  }
-  var id = metaData.id,
-    bound = metaData.bound;
+function createBoundServerReference(metaData, callServer, encodeFormAction, findSourceMapURL // DEV-only
+) {
+  const id = metaData.id;
+  const bound = metaData.bound;
+  let action = function () {
+    // $FlowFixMe[method-unbinding]
+    const args = Array.prototype.slice.call(arguments);
+    const p = bound;
+    if (!p) {
+      return callServer(id, args);
+    }
+    if (p.status === 'fulfilled') {
+      const boundArgs = p.value;
+      return callServer(id, boundArgs.concat(args));
+    }
+    // Since this is a fake Promise whose .then doesn't chain, we have to wrap it.
+    // TODO: Remove the wrapper once that's fixed.
+    return Promise.resolve(p).then(function (boundArgs) {
+      return callServer(id, boundArgs.concat(args));
+    });
+  };
   registerBoundServerReference(action, id, bound, encodeFormAction);
   return action;
 }
-function createServerReference$1(id, callServer, encodeFormAction) {
-  function action() {
-    var args = Array.prototype.slice.call(arguments);
+function createServerReference$1(id, callServer, encodeFormAction, findSourceMapURL,
+// DEV-only
+functionName) {
+  let action = function () {
+    // $FlowFixMe[method-unbinding]
+    const args = Array.prototype.slice.call(arguments);
     return callServer(id, args);
-  }
+  };
   registerBoundServerReference(action, id, null, encodeFormAction);
   return action;
 }
+
+const ROW_ID = 0;
+const ROW_TAG = 1;
+const ROW_LENGTH = 2;
+const ROW_CHUNK_BY_NEWLINE = 3;
+const ROW_CHUNK_BY_LENGTH = 4;
+const PENDING = 'pending';
+const BLOCKED = 'blocked';
+const RESOLVED_MODEL = 'resolved_model';
+const RESOLVED_MODULE = 'resolved_module';
+const INITIALIZED = 'fulfilled';
+const ERRORED = 'rejected';
+const HALTED = 'halted'; // DEV-only. Means it never resolves even if connection closes.
+
+// $FlowFixMe[missing-this-annot]
 function ReactPromise(status, value, reason) {
   this.status = status;
   this.value = value;
   this.reason = reason;
 }
+// We subclass Promise.prototype so that we get other methods like .catch
 ReactPromise.prototype = Object.create(Promise.prototype);
+// TODO: This doesn't return a new Promise chain unlike the real .then
 ReactPromise.prototype.then = function (resolve, reject) {
-  switch (this.status) {
-    case "resolved_model":
-      initializeModelChunk(this);
-      break;
-    case "resolved_module":
-      initializeModuleChunk(this);
-  }
-  switch (this.status) {
-    case "fulfilled":
-      "function" === typeof resolve && resolve(this.value);
-      break;
-    case "pending":
-    case "blocked":
-      "function" === typeof resolve &&
-        (null === this.value && (this.value = []), this.value.push(resolve));
-      "function" === typeof reject &&
-        (null === this.reason && (this.reason = []), this.reason.push(reject));
-      break;
-    case "halted":
-      break;
-    default:
-      "function" === typeof reject && reject(this.reason);
-  }
-};
-function readChunk(chunk) {
+  const chunk = this;
+  // If we have resolved content, we try to initialize it first which
+  // might put us back into one of the other states.
   switch (chunk.status) {
-    case "resolved_model":
+    case RESOLVED_MODEL:
       initializeModelChunk(chunk);
       break;
-    case "resolved_module":
+    case RESOLVED_MODULE:
       initializeModuleChunk(chunk);
+      break;
   }
+  // The status might have changed after initialization.
   switch (chunk.status) {
-    case "fulfilled":
+    case INITIALIZED:
+      if (typeof resolve === 'function') {
+        resolve(chunk.value);
+      }
+      break;
+    case PENDING:
+    case BLOCKED:
+      if (typeof resolve === 'function') {
+        if (chunk.value === null) {
+          chunk.value = [];
+        }
+        chunk.value.push(resolve);
+      }
+      if (typeof reject === 'function') {
+        if (chunk.reason === null) {
+          chunk.reason = [];
+        }
+        chunk.reason.push(reject);
+      }
+      break;
+    case HALTED:
+      {
+        break;
+      }
+    default:
+      if (typeof reject === 'function') {
+        reject(chunk.reason);
+      }
+      break;
+  }
+};
+function unwrapWeakResponse(weakResponse) {
+  {
+    return weakResponse; // In prod we just use the real Response directly.
+  }
+}
+function getWeakResponse(response) {
+  {
+    return response; // In prod we just use the real Response directly.
+  }
+}
+function readChunk(chunk) {
+  // If we have resolved content, we try to initialize it first which
+  // might put us back into one of the other states.
+  switch (chunk.status) {
+    case RESOLVED_MODEL:
+      initializeModelChunk(chunk);
+      break;
+    case RESOLVED_MODULE:
+      initializeModuleChunk(chunk);
+      break;
+  }
+  // The status might have changed after initialization.
+  switch (chunk.status) {
+    case INITIALIZED:
       return chunk.value;
-    case "pending":
-    case "blocked":
-    case "halted":
+    case PENDING:
+    case BLOCKED:
+    case HALTED:
+      // eslint-disable-next-line no-throw-literal
       throw chunk;
     default:
       throw chunk.reason;
   }
 }
+function getRoot(weakResponse) {
+  const response = unwrapWeakResponse(weakResponse);
+  const chunk = getChunk(response, 0);
+  return chunk;
+}
+function createPendingChunk(response) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(PENDING, null, null);
+}
+function createBlockedChunk(response) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(BLOCKED, null, null);
+}
+function createErrorChunk(response, error) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(ERRORED, null, error);
+}
+function filterDebugInfo(response, value) {
+  if (response._debugEndTime === null) {
+    // No end time was defined, so we keep all debug info entries.
+    return;
+  }
+
+  // Remove any debug info entries after the defined end time. For async info
+  // that means we're including anything that was awaited before the end time,
+  // but it doesn't need to be resolved before the end time.
+  const relativeEndTime = response._debugEndTime -
+  // $FlowFixMe[prop-missing]
+  performance.timeOrigin;
+  const debugInfo = [];
+  for (let i = 0; i < value._debugInfo.length; i++) {
+    const info = value._debugInfo[i];
+    if (typeof info.time === 'number' && info.time > relativeEndTime) {
+      break;
+    }
+    debugInfo.push(info);
+  }
+  value._debugInfo = debugInfo;
+}
+function moveDebugInfoFromChunkToInnerValue(chunk, value) {
+  // Remove the debug info from the initialized chunk, and add it to the inner
+  // value instead. This can be a React element, an array, or an uninitialized
+  // Lazy.
+  const resolvedValue = resolveLazy(value);
+  if (typeof resolvedValue === 'object' && resolvedValue !== null && (isArray(resolvedValue) || typeof resolvedValue[ASYNC_ITERATOR] === 'function' || resolvedValue.$$typeof === REACT_ELEMENT_TYPE || resolvedValue.$$typeof === REACT_LAZY_TYPE)) {
+    const debugInfo = chunk._debugInfo.splice(0);
+    if (isArray(resolvedValue._debugInfo)) {
+      // $FlowFixMe[method-unbinding]
+      resolvedValue._debugInfo.unshift.apply(resolvedValue._debugInfo, debugInfo);
+    } else {
+      Object.defineProperty(resolvedValue, '_debugInfo', {
+        configurable: false,
+        enumerable: false,
+        writable: true,
+        value: debugInfo
+      });
+    }
+  }
+}
+function processChunkDebugInfo(response, chunk, value) {
+  filterDebugInfo(response, chunk);
+  moveDebugInfoFromChunkToInnerValue(chunk, value);
+}
 function wakeChunk(response, listeners, value, chunk) {
-  for (var i = 0; i < listeners.length; i++) {
-    var listener = listeners[i];
-    "function" === typeof listener
-      ? listener(value)
-      : fulfillReference(response, listener, value, chunk);
+  for (let i = 0; i < listeners.length; i++) {
+    const listener = listeners[i];
+    if (typeof listener === 'function') {
+      listener(value);
+    } else {
+      fulfillReference(response, listener, value, chunk);
+    }
   }
 }
 function rejectChunk(response, listeners, error) {
-  for (var i = 0; i < listeners.length; i++) {
-    var listener = listeners[i];
-    "function" === typeof listener
-      ? listener(error)
-      : rejectReference(response, listener.handler, error);
+  for (let i = 0; i < listeners.length; i++) {
+    const listener = listeners[i];
+    if (typeof listener === 'function') {
+      listener(error);
+    } else {
+      rejectReference(response, listener.handler, error);
+    }
   }
 }
 function resolveBlockedCycle(resolvedChunk, reference) {
-  var referencedChunk = reference.handler.chunk;
-  if (null === referencedChunk) return null;
-  if (referencedChunk === resolvedChunk) return reference.handler;
-  reference = referencedChunk.value;
-  if (null !== reference)
-    for (
-      referencedChunk = 0;
-      referencedChunk < reference.length;
-      referencedChunk++
-    ) {
-      var listener = reference[referencedChunk];
-      if (
-        "function" !== typeof listener &&
-        ((listener = resolveBlockedCycle(resolvedChunk, listener)),
-        null !== listener)
-      )
-        return listener;
-    }
-  return null;
-}
-function wakeChunkIfInitialized(
-  response,
-  chunk,
-  resolveListeners,
-  rejectListeners
-) {
-  switch (chunk.status) {
-    case "fulfilled":
-      wakeChunk(response, resolveListeners, chunk.value, chunk);
-      break;
-    case "blocked":
-      for (var i = 0; i < resolveListeners.length; i++) {
-        var listener = resolveListeners[i];
-        if ("function" !== typeof listener) {
-          var cyclicHandler = resolveBlockedCycle(chunk, listener);
-          if (null !== cyclicHandler)
-            switch (
-              (fulfillReference(response, listener, cyclicHandler.value, chunk),
-              resolveListeners.splice(i, 1),
-              i--,
-              null !== rejectListeners &&
-                ((listener = rejectListeners.indexOf(listener)),
-                -1 !== listener && rejectListeners.splice(listener, 1)),
-              chunk.status)
-            ) {
-              case "fulfilled":
-                wakeChunk(response, resolveListeners, chunk.value, chunk);
-                return;
-              case "rejected":
-                null !== rejectListeners &&
-                  rejectChunk(response, rejectListeners, chunk.reason);
-                return;
-            }
+  const referencedChunk = reference.handler.chunk;
+  if (referencedChunk === null) {
+    return null;
+  }
+  if (referencedChunk === resolvedChunk) {
+    // We found the cycle. We can resolve the blocked cycle now.
+    return reference.handler;
+  }
+  const resolveListeners = referencedChunk.value;
+  if (resolveListeners !== null) {
+    for (let i = 0; i < resolveListeners.length; i++) {
+      const listener = resolveListeners[i];
+      if (typeof listener !== 'function') {
+        const foundHandler = resolveBlockedCycle(resolvedChunk, listener);
+        if (foundHandler !== null) {
+          return foundHandler;
         }
       }
-    case "pending":
-      if (chunk.value)
-        for (response = 0; response < resolveListeners.length; response++)
-          chunk.value.push(resolveListeners[response]);
-      else chunk.value = resolveListeners;
-      if (chunk.reason) {
-        if (rejectListeners)
-          for (
-            resolveListeners = 0;
-            resolveListeners < rejectListeners.length;
-            resolveListeners++
-          )
-            chunk.reason.push(rejectListeners[resolveListeners]);
-      } else chunk.reason = rejectListeners;
+    }
+  }
+  return null;
+}
+function wakeChunkIfInitialized(response, chunk, resolveListeners, rejectListeners) {
+  switch (chunk.status) {
+    case INITIALIZED:
+      wakeChunk(response, resolveListeners, chunk.value, chunk);
       break;
-    case "rejected":
-      rejectListeners && rejectChunk(response, rejectListeners, chunk.reason);
+    case BLOCKED:
+      // It is possible that we're blocked on our own chunk if it's a cycle.
+      // Before adding back the listeners to the chunk, let's check if it would
+      // result in a cycle.
+      for (let i = 0; i < resolveListeners.length; i++) {
+        const listener = resolveListeners[i];
+        if (typeof listener !== 'function') {
+          const reference = listener;
+          const cyclicHandler = resolveBlockedCycle(chunk, reference);
+          if (cyclicHandler !== null) {
+            // This reference points back to this chunk. We can resolve the cycle by
+            // using the value from that handler.
+            fulfillReference(response, reference, cyclicHandler.value, chunk);
+            resolveListeners.splice(i, 1);
+            i--;
+            if (rejectListeners !== null) {
+              const rejectionIdx = rejectListeners.indexOf(reference);
+              if (rejectionIdx !== -1) {
+                rejectListeners.splice(rejectionIdx, 1);
+              }
+            }
+            // The status might have changed after fulfilling the reference.
+            switch (chunk.status) {
+              case INITIALIZED:
+                const initializedChunk = chunk;
+                wakeChunk(response, resolveListeners, initializedChunk.value, initializedChunk);
+                return;
+              case ERRORED:
+                if (rejectListeners !== null) {
+                  rejectChunk(response, rejectListeners, chunk.reason);
+                }
+                return;
+            }
+          }
+        }
+      }
+    // Fallthrough
+    case PENDING:
+      if (chunk.value) {
+        for (let i = 0; i < resolveListeners.length; i++) {
+          chunk.value.push(resolveListeners[i]);
+        }
+      } else {
+        chunk.value = resolveListeners;
+      }
+      if (chunk.reason) {
+        if (rejectListeners) {
+          for (let i = 0; i < rejectListeners.length; i++) {
+            chunk.reason.push(rejectListeners[i]);
+          }
+        }
+      } else {
+        chunk.reason = rejectListeners;
+      }
+      break;
+    case ERRORED:
+      if (rejectListeners) {
+        rejectChunk(response, rejectListeners, chunk.reason);
+      }
+      break;
   }
 }
 function triggerErrorOnChunk(response, chunk, error) {
-  if ("pending" !== chunk.status && "blocked" !== chunk.status)
-    chunk.reason.error(error);
-  else {
-    var listeners = chunk.reason;
-    chunk.status = "rejected";
-    chunk.reason = error;
-    null !== listeners && rejectChunk(response, listeners, error);
+  if (chunk.status !== PENDING && chunk.status !== BLOCKED) {
+    // If we get more data to an already resolved ID, we assume that it's
+    // a stream chunk since any other row shouldn't have more than one entry.
+    const streamChunk = chunk;
+    const controller = streamChunk.reason;
+    // $FlowFixMe[incompatible-call]: The error method should accept mixed.
+    controller.error(error);
+    return;
+  }
+  const listeners = chunk.reason;
+  const erroredChunk = chunk;
+  erroredChunk.status = ERRORED;
+  erroredChunk.reason = error;
+  if (listeners !== null) {
+    rejectChunk(response, listeners, error);
   }
 }
+function createResolvedModelChunk(response, value) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(RESOLVED_MODEL, value, response);
+}
+function createResolvedModuleChunk(response, value) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(RESOLVED_MODULE, value, null);
+}
+function createInitializedTextChunk(response, value) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(INITIALIZED, value, null);
+}
+function createInitializedBufferChunk(response, value) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(INITIALIZED, value, null);
+}
+function createInitializedIteratorResultChunk(response, value, done) {
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(INITIALIZED, {
+    done: done,
+    value: value
+  }, null);
+}
+function createInitializedStreamChunk(response, value, controller) {
+  // We use the reason field to stash the controller since we already have that
+  // field. It's a bit of a hack but efficient.
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(INITIALIZED, value, controller);
+}
 function createResolvedIteratorResultChunk(response, value, done) {
-  return new ReactPromise(
-    "resolved_model",
-    (done ? '{"done":true,"value":' : '{"done":false,"value":') + value + "}",
-    response
-  );
+  // To reuse code as much code as possible we add the wrapper element as part of the JSON.
+  const iteratorResultJSON = (done ? '{"done":true,"value":' : '{"done":false,"value":') + value + '}';
+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+  return new ReactPromise(RESOLVED_MODEL, iteratorResultJSON, response);
 }
 function resolveIteratorResultChunk(response, chunk, value, done) {
-  resolveModelChunk(
-    response,
-    chunk,
-    (done ? '{"done":true,"value":' : '{"done":false,"value":') + value + "}"
-  );
+  // To reuse code as much code as possible we add the wrapper element as part of the JSON.
+  const iteratorResultJSON = (done ? '{"done":true,"value":' : '{"done":false,"value":') + value + '}';
+  resolveModelChunk(response, chunk, iteratorResultJSON);
 }
 function resolveModelChunk(response, chunk, value) {
-  if ("pending" !== chunk.status) chunk.reason.enqueueModel(value);
-  else {
-    var resolveListeners = chunk.value,
-      rejectListeners = chunk.reason;
-    chunk.status = "resolved_model";
-    chunk.value = value;
-    chunk.reason = response;
-    null !== resolveListeners &&
-      (initializeModelChunk(chunk),
-      wakeChunkIfInitialized(
-        response,
-        chunk,
-        resolveListeners,
-        rejectListeners
-      ));
+  if (chunk.status !== PENDING) {
+    // If we get more data to an already resolved ID, we assume that it's
+    // a stream chunk since any other row shouldn't have more than one entry.
+    const streamChunk = chunk;
+    const controller = streamChunk.reason;
+    controller.enqueueModel(value);
+    return;
+  }
+  const resolveListeners = chunk.value;
+  const rejectListeners = chunk.reason;
+  const resolvedChunk = chunk;
+  resolvedChunk.status = RESOLVED_MODEL;
+  resolvedChunk.value = value;
+  resolvedChunk.reason = response;
+  if (resolveListeners !== null) {
+    // This is unfortunate that we're reading this eagerly if
+    // we already have listeners attached since they might no
+    // longer be rendered or might not be the highest pri.
+    initializeModelChunk(resolvedChunk);
+    // The status might have changed after initialization.
+    wakeChunkIfInitialized(response, chunk, resolveListeners, rejectListeners);
   }
 }
 function resolveModuleChunk(response, chunk, value) {
-  if ("pending" === chunk.status || "blocked" === chunk.status) {
-    var resolveListeners = chunk.value,
-      rejectListeners = chunk.reason;
-    chunk.status = "resolved_module";
-    chunk.value = value;
-    chunk.reason = null;
-    null !== resolveListeners &&
-      (initializeModuleChunk(chunk),
-      wakeChunkIfInitialized(
-        response,
-        chunk,
-        resolveListeners,
-        rejectListeners
-      ));
+  if (chunk.status !== PENDING && chunk.status !== BLOCKED) {
+    // We already resolved. We didn't expect to see this.
+    return;
+  }
+  const resolveListeners = chunk.value;
+  const rejectListeners = chunk.reason;
+  const resolvedChunk = chunk;
+  resolvedChunk.status = RESOLVED_MODULE;
+  resolvedChunk.value = value;
+  resolvedChunk.reason = null;
+  if (resolveListeners !== null) {
+    initializeModuleChunk(resolvedChunk);
+    wakeChunkIfInitialized(response, chunk, resolveListeners, rejectListeners);
   }
 }
-var initializingHandler = null;
+let initializingHandler = null;
 function initializeModelChunk(chunk) {
-  var prevHandler = initializingHandler;
+  const prevHandler = initializingHandler;
   initializingHandler = null;
-  var resolvedModel = chunk.value,
-    response = chunk.reason;
-  chunk.status = "blocked";
-  chunk.value = null;
-  chunk.reason = null;
+  const resolvedModel = chunk.value;
+  const response = chunk.reason;
+
+  // We go to the BLOCKED state until we've fully resolved this.
+  // We do this before parsing in case we try to initialize the same chunk
+  // while parsing the model. Such as in a cyclic reference.
+  const cyclicChunk = chunk;
+  cyclicChunk.status = BLOCKED;
+  cyclicChunk.value = null;
+  cyclicChunk.reason = null;
   try {
-    var value = JSON.parse(resolvedModel, response._fromJSON),
-      resolveListeners = chunk.value;
-    if (null !== resolveListeners)
-      for (
-        chunk.value = null, chunk.reason = null, resolvedModel = 0;
-        resolvedModel < resolveListeners.length;
-        resolvedModel++
-      ) {
-        var listener = resolveListeners[resolvedModel];
-        "function" === typeof listener
-          ? listener(value)
-          : fulfillReference(response, listener, value, chunk);
+    const value = parseModel(response, resolvedModel);
+    // Invoke any listeners added while resolving this model. I.e. cyclic
+    // references. This may or may not fully resolve the model depending on
+    // if they were blocked.
+    const resolveListeners = cyclicChunk.value;
+    if (resolveListeners !== null) {
+      cyclicChunk.value = null;
+      cyclicChunk.reason = null;
+      for (let i = 0; i < resolveListeners.length; i++) {
+        const listener = resolveListeners[i];
+        if (typeof listener === 'function') {
+          listener(value);
+        } else {
+          fulfillReference(response, listener, value, cyclicChunk);
+        }
       }
-    if (null !== initializingHandler) {
-      if (initializingHandler.errored) throw initializingHandler.reason;
-      if (0 < initializingHandler.deps) {
+    }
+    if (initializingHandler !== null) {
+      if (initializingHandler.errored) {
+        throw initializingHandler.reason;
+      }
+      if (initializingHandler.deps > 0) {
+        // We discovered new dependencies on modules that are not yet resolved.
+        // We have to keep the BLOCKED state until they're resolved.
         initializingHandler.value = value;
-        initializingHandler.chunk = chunk;
+        initializingHandler.chunk = cyclicChunk;
         return;
       }
     }
-    chunk.status = "fulfilled";
-    chunk.value = value;
+    const initializedChunk = chunk;
+    initializedChunk.status = INITIALIZED;
+    initializedChunk.value = value;
+    if (false) ;
   } catch (error) {
-    (chunk.status = "rejected"), (chunk.reason = error);
+    const erroredChunk = chunk;
+    erroredChunk.status = ERRORED;
+    erroredChunk.reason = error;
   } finally {
     initializingHandler = prevHandler;
   }
 }
 function initializeModuleChunk(chunk) {
   try {
-    var value = requireModule(chunk.value);
-    chunk.status = "fulfilled";
-    chunk.value = value;
+    const value = requireModule(chunk.value);
+    const initializedChunk = chunk;
+    initializedChunk.status = INITIALIZED;
+    initializedChunk.value = value;
   } catch (error) {
-    (chunk.status = "rejected"), (chunk.reason = error);
+    const erroredChunk = chunk;
+    erroredChunk.status = ERRORED;
+    erroredChunk.reason = error;
   }
 }
+
+// Report that any missing chunks in the model is now going to throw this
+// error upon read. Also notify any pending promises.
 function reportGlobalError(weakResponse, error) {
-  weakResponse._closed = !0;
-  weakResponse._closedReason = error;
-  weakResponse._chunks.forEach(function (chunk) {
-    "pending" === chunk.status
-      ? triggerErrorOnChunk(weakResponse, chunk, error)
-      : "fulfilled" === chunk.status &&
-        null !== chunk.reason &&
-        chunk.reason.error(error);
+  const response = unwrapWeakResponse(weakResponse);
+  response._closed = true;
+  response._closedReason = error;
+  response._chunks.forEach(chunk => {
+    // If this chunk was already resolved or errored, it won't
+    // trigger an error but if it wasn't then we need to
+    // because we won't be getting any new data to resolve it.
+    if (chunk.status === PENDING) {
+      triggerErrorOnChunk(response, chunk, error);
+    } else if (chunk.status === INITIALIZED && chunk.reason !== null) {
+      chunk.reason.error(error);
+    }
   });
 }
-function createLazyChunkWrapper(chunk) {
-  return { $$typeof: REACT_LAZY_TYPE, _payload: chunk, _init: readChunk };
+function createElement(response, type, key, props, owner,
+// DEV-only
+stack,
+// DEV-only
+validated // DEV-only
+) {
+  let element;
+  {
+    element = {
+      // This tag allows us to uniquely identify this as a React Element
+      $$typeof: REACT_ELEMENT_TYPE,
+      type,
+      key,
+      ref: null,
+      props
+    };
+  }
+  if (initializingHandler !== null) {
+    const handler = initializingHandler;
+    // We pop the stack to the previous outer handler before leaving the Element.
+    // This is effectively the complete phase.
+    initializingHandler = handler.parent;
+    if (handler.errored) {
+      // Something errored inside this Element's props. We can turn this Element
+      // into a Lazy so that we can still render up until that Lazy is rendered.
+      const erroredChunk = createErrorChunk(response, handler.reason);
+      return createLazyChunkWrapper(erroredChunk);
+    }
+    if (handler.deps > 0) {
+      // We have blocked references inside this Element but we can turn this into
+      // a Lazy node referencing this Element to let everything around it proceed.
+      const blockedChunk = createBlockedChunk();
+      handler.value = element;
+      handler.chunk = blockedChunk;
+      const lazyNode = createLazyChunkWrapper(blockedChunk);
+      return lazyNode;
+    }
+  }
+  return element;
+}
+function createLazyChunkWrapper(chunk, validated // DEV-only
+) {
+  const lazyType = {
+    $$typeof: REACT_LAZY_TYPE,
+    _payload: chunk,
+    _init: readChunk
+  };
+  return lazyType;
 }
 function getChunk(response, id) {
-  var chunks = response._chunks,
-    chunk = chunks.get(id);
-  chunk ||
-    ((chunk = response._closed
-      ? new ReactPromise("rejected", null, response._closedReason)
-      : new ReactPromise("pending", null, null)),
-    chunks.set(id, chunk));
+  const chunks = response._chunks;
+  let chunk = chunks.get(id);
+  if (!chunk) {
+    if (response._closed) {
+      // We have already errored the response and we're not going to get
+      // anything more streaming in so this will immediately error.
+      chunk = createErrorChunk(response, response._closedReason);
+    } else {
+      chunk = createPendingChunk();
+    }
+    chunks.set(id, chunk);
+  }
   return chunk;
 }
-function fulfillReference(response, reference, value) {
-  var handler = reference.handler,
+function fulfillReference(response, reference, value, fulfilledChunk) {
+  const handler = reference.handler,
     parentObject = reference.parentObject,
     key = reference.key,
     map = reference.map,
     path = reference.path;
   try {
-    for (var i = 1; i < path.length; i++) {
-      for (
-        ;
-        "object" === typeof value &&
-        null !== value &&
-        value.$$typeof === REACT_LAZY_TYPE;
-
-      ) {
-        var referencedChunk = value._payload;
-        if (referencedChunk === handler.chunk) value = handler.value;
-        else {
+    for (let i = 1; i < path.length; i++) {
+      while (typeof value === 'object' && value !== null && value.$$typeof === REACT_LAZY_TYPE) {
+        // We never expect to see a Lazy node on this path because we encode those as
+        // separate models. This must mean that we have inserted an extra lazy node
+        // e.g. to replace a blocked element. We must instead look for it inside.
+        const referencedChunk = value._payload;
+        if (referencedChunk === handler.chunk) {
+          // This is a reference to the thing we're currently blocking. We can peak
+          // inside of it to get the value.
+          value = handler.value;
+          continue;
+        } else {
           switch (referencedChunk.status) {
-            case "resolved_model":
+            case RESOLVED_MODEL:
               initializeModelChunk(referencedChunk);
               break;
-            case "resolved_module":
+            case RESOLVED_MODULE:
               initializeModuleChunk(referencedChunk);
+              break;
           }
           switch (referencedChunk.status) {
-            case "fulfilled":
-              value = referencedChunk.value;
-              continue;
-            case "blocked":
-              var cyclicHandler = resolveBlockedCycle(
-                referencedChunk,
-                reference
-              );
-              if (null !== cyclicHandler) {
-                value = cyclicHandler.value;
+            case INITIALIZED:
+              {
+                value = referencedChunk.value;
                 continue;
               }
-            case "pending":
-              path.splice(0, i - 1);
-              null === referencedChunk.value
-                ? (referencedChunk.value = [reference])
-                : referencedChunk.value.push(reference);
-              null === referencedChunk.reason
-                ? (referencedChunk.reason = [reference])
-                : referencedChunk.reason.push(reference);
-              return;
-            case "halted":
-              return;
+            case BLOCKED:
+              {
+                // It is possible that we're blocked on our own chunk if it's a cycle.
+                // Before adding the listener to the inner chunk, let's check if it would
+                // result in a cycle.
+                const cyclicHandler = resolveBlockedCycle(referencedChunk, reference);
+                if (cyclicHandler !== null) {
+                  // This reference points back to this chunk. We can resolve the cycle by
+                  // using the value from that handler.
+                  value = cyclicHandler.value;
+                  continue;
+                }
+                // Fallthrough
+              }
+            case PENDING:
+              {
+                // If we're not yet initialized we need to skip what we've already drilled
+                // through and then wait for the next value to become available.
+                path.splice(0, i - 1);
+                // Add "listener" to our new chunk dependency.
+                if (referencedChunk.value === null) {
+                  referencedChunk.value = [reference];
+                } else {
+                  referencedChunk.value.push(reference);
+                }
+                if (referencedChunk.reason === null) {
+                  referencedChunk.reason = [reference];
+                } else {
+                  referencedChunk.reason.push(reference);
+                }
+                return;
+              }
+            case HALTED:
+              {
+                // Do nothing. We couldn't fulfill.
+                // TODO: Mark downstreams as halted too.
+                return;
+              }
             default:
-              rejectReference(
-                response,
-                reference.handler,
-                referencedChunk.reason
-              );
-              return;
+              {
+                rejectReference(response, reference.handler, referencedChunk.reason);
+                return;
+              }
           }
         }
       }
       value = value[path[i]];
     }
-    for (
-      ;
-      "object" === typeof value &&
-      null !== value &&
-      value.$$typeof === REACT_LAZY_TYPE;
-
-    ) {
-      var referencedChunk$43 = value._payload;
-      if (referencedChunk$43 === handler.chunk) value = handler.value;
-      else {
-        switch (referencedChunk$43.status) {
-          case "resolved_model":
-            initializeModelChunk(referencedChunk$43);
+    while (typeof value === 'object' && value !== null && value.$$typeof === REACT_LAZY_TYPE) {
+      // If what we're referencing is a Lazy it must be because we inserted one as a virtual node
+      // while it was blocked by other data. If it's no longer blocked, we can unwrap it.
+      const referencedChunk = value._payload;
+      if (referencedChunk === handler.chunk) {
+        // This is a reference to the thing we're currently blocking. We can peak
+        // inside of it to get the value.
+        value = handler.value;
+        continue;
+      } else {
+        switch (referencedChunk.status) {
+          case RESOLVED_MODEL:
+            initializeModelChunk(referencedChunk);
             break;
-          case "resolved_module":
-            initializeModuleChunk(referencedChunk$43);
+          case RESOLVED_MODULE:
+            initializeModuleChunk(referencedChunk);
+            break;
         }
-        switch (referencedChunk$43.status) {
-          case "fulfilled":
-            value = referencedChunk$43.value;
-            continue;
+        switch (referencedChunk.status) {
+          case INITIALIZED:
+            {
+              value = referencedChunk.value;
+              continue;
+            }
         }
-        break;
       }
+      break;
     }
-    var mappedValue = map(response, value, parentObject, key);
+    const mappedValue = map(response, value, parentObject, key);
     parentObject[key] = mappedValue;
-    "" === key && null === handler.value && (handler.value = mappedValue);
-    if (
-      parentObject[0] === REACT_ELEMENT_TYPE &&
-      "object" === typeof handler.value &&
-      null !== handler.value &&
-      handler.value.$$typeof === REACT_ELEMENT_TYPE
-    ) {
-      var element = handler.value;
-      switch (key) {
-        case "3":
-          element.props = mappedValue;
-      }
+
+    // If this is the root object for a model reference, where `handler.value`
+    // is a stale `null`, the resolved value can be used directly.
+    if (key === '' && handler.value === null) {
+      handler.value = mappedValue;
     }
+
+    // If the parent object is an unparsed React element tuple, we also need to
+    // update the props and owner of the parsed element object (i.e.
+    // handler.value).
+    if (parentObject[0] === REACT_ELEMENT_TYPE && typeof handler.value === 'object' && handler.value !== null && handler.value.$$typeof === REACT_ELEMENT_TYPE) {
+      const element = handler.value;
+      switch (key) {
+        case '3':
+          transferReferencedDebugInfo(handler.chunk, fulfilledChunk);
+          element.props = mappedValue;
+          break;
+        case '4':
+          // This path doesn't call transferReferencedDebugInfo because this reference is to a debug chunk.
+          if (false) ;
+          break;
+        case '5':
+          // This path doesn't call transferReferencedDebugInfo because this reference is to a debug chunk.
+          if (false) ;
+          break;
+        default:
+          transferReferencedDebugInfo(handler.chunk, fulfilledChunk);
+          break;
+      }
+    } else if (false && !reference.isDebug) ;
   } catch (error) {
     rejectReference(response, reference.handler, error);
     return;
   }
   handler.deps--;
-  0 === handler.deps &&
-    ((reference = handler.chunk),
-    null !== reference &&
-      "blocked" === reference.status &&
-      ((value = reference.value),
-      (reference.status = "fulfilled"),
-      (reference.value = handler.value),
-      (reference.reason = handler.reason),
-      null !== value && wakeChunk(response, value, handler.value, reference)));
+  if (handler.deps === 0) {
+    const chunk = handler.chunk;
+    if (chunk === null || chunk.status !== BLOCKED) {
+      return;
+    }
+    const resolveListeners = chunk.value;
+    const initializedChunk = chunk;
+    initializedChunk.status = INITIALIZED;
+    initializedChunk.value = handler.value;
+    initializedChunk.reason = handler.reason; // Used by streaming chunks
+    if (resolveListeners !== null) {
+      wakeChunk(response, resolveListeners, handler.value, initializedChunk);
+    }
+  }
 }
 function rejectReference(response, handler, error) {
-  handler.errored ||
-    ((handler.errored = !0),
-    (handler.value = null),
-    (handler.reason = error),
-    (handler = handler.chunk),
-    null !== handler &&
-      "blocked" === handler.status &&
-      triggerErrorOnChunk(response, handler, error));
+  if (handler.errored) {
+    // We've already errored. We could instead build up an AggregateError
+    // but if there are multiple errors we just take the first one like
+    // Promise.all.
+    return;
+  }
+  handler.errored = true;
+  handler.value = null;
+  handler.reason = error;
+  const chunk = handler.chunk;
+  if (chunk === null || chunk.status !== BLOCKED) {
+    return;
+  }
+  triggerErrorOnChunk(response, chunk, error);
 }
-function waitForReference(
-  referencedChunk,
-  parentObject,
-  key,
-  response,
-  map,
-  path
+function waitForReference(referencedChunk, parentObject, key, response, map, path, isAwaitingDebugInfo // DEV-only
 ) {
-  initializingHandler
-    ? ((response = initializingHandler), response.deps++)
-    : (response = initializingHandler =
-        {
-          parent: null,
-          chunk: null,
-          value: null,
-          reason: null,
-          deps: 1,
-          errored: !1
-        });
-  parentObject = {
-    handler: response,
-    parentObject: parentObject,
-    key: key,
-    map: map,
-    path: path
-  };
-  null === referencedChunk.value
-    ? (referencedChunk.value = [parentObject])
-    : referencedChunk.value.push(parentObject);
-  null === referencedChunk.reason
-    ? (referencedChunk.reason = [parentObject])
-    : referencedChunk.reason.push(parentObject);
-  return null;
-}
-function loadServerReference(response, metaData, parentObject, key) {
-  if (!response._serverReferenceConfig)
-    return createBoundServerReference(
-      metaData,
-      response._callServer,
-      response._encodeFormAction
-    );
-  var serverReference = resolveServerReference(
-      response._serverReferenceConfig,
-      metaData.id
-    ),
-    promise = preloadModule(serverReference);
-  if (promise)
-    metaData.bound && (promise = Promise.all([promise, metaData.bound]));
-  else if (metaData.bound) promise = Promise.resolve(metaData.bound);
-  else
-    return (
-      (promise = requireModule(serverReference)),
-      registerBoundServerReference(
-        promise,
-        metaData.id,
-        metaData.bound,
-        response._encodeFormAction
-      ),
-      promise
-    );
+  let handler;
   if (initializingHandler) {
-    var handler = initializingHandler;
+    handler = initializingHandler;
     handler.deps++;
-  } else
+  } else {
     handler = initializingHandler = {
       parent: null,
       chunk: null,
       value: null,
       reason: null,
       deps: 1,
-      errored: !1
+      errored: false
     };
-  promise.then(
-    function () {
-      var resolvedValue = requireModule(serverReference);
-      if (metaData.bound) {
-        var boundArgs = metaData.bound.value.slice(0);
-        boundArgs.unshift(null);
-        resolvedValue = resolvedValue.bind.apply(resolvedValue, boundArgs);
-      }
-      registerBoundServerReference(
-        resolvedValue,
-        metaData.id,
-        metaData.bound,
-        response._encodeFormAction
-      );
-      parentObject[key] = resolvedValue;
-      "" === key && null === handler.value && (handler.value = resolvedValue);
-      if (
-        parentObject[0] === REACT_ELEMENT_TYPE &&
-        "object" === typeof handler.value &&
-        null !== handler.value &&
-        handler.value.$$typeof === REACT_ELEMENT_TYPE
-      )
-        switch (((boundArgs = handler.value), key)) {
-          case "3":
-            boundArgs.props = resolvedValue;
-        }
-      handler.deps--;
-      0 === handler.deps &&
-        ((resolvedValue = handler.chunk),
-        null !== resolvedValue &&
-          "blocked" === resolvedValue.status &&
-          ((boundArgs = resolvedValue.value),
-          (resolvedValue.status = "fulfilled"),
-          (resolvedValue.value = handler.value),
-          (resolvedValue.reason = null),
-          null !== boundArgs &&
-            wakeChunk(response, boundArgs, handler.value, resolvedValue)));
-    },
-    function (error) {
-      if (!handler.errored) {
-        handler.errored = !0;
-        handler.value = null;
-        handler.reason = error;
-        var chunk = handler.chunk;
-        null !== chunk &&
-          "blocked" === chunk.status &&
-          triggerErrorOnChunk(response, chunk, error);
-      }
-    }
-  );
+  }
+  const reference = {
+    handler,
+    parentObject,
+    key,
+    map,
+    path
+  };
+
+  // Add "listener".
+  if (referencedChunk.value === null) {
+    referencedChunk.value = [reference];
+  } else {
+    referencedChunk.value.push(reference);
+  }
+  if (referencedChunk.reason === null) {
+    referencedChunk.reason = [reference];
+  } else {
+    referencedChunk.reason.push(reference);
+  }
+
+  // Return a place holder value for now.
   return null;
 }
-function getOutlinedModel(response, reference, parentObject, key, map) {
-  reference = reference.split(":");
-  var id = parseInt(reference[0], 16);
-  id = getChunk(response, id);
-  switch (id.status) {
-    case "resolved_model":
-      initializeModelChunk(id);
-      break;
-    case "resolved_module":
-      initializeModuleChunk(id);
+function loadServerReference(response, metaData, parentObject, key) {
+  if (!response._serverReferenceConfig) {
+    // In the normal case, we can't load this Server Reference in the current environment and
+    // we just return a proxy to it.
+    return createBoundServerReference(metaData, response._callServer, response._encodeFormAction);
   }
-  switch (id.status) {
-    case "fulfilled":
-      id = id.value;
-      for (var i = 1; i < reference.length; i++) {
-        for (
-          ;
-          "object" === typeof id &&
-          null !== id &&
-          id.$$typeof === REACT_LAZY_TYPE;
+  // If we have a module mapping we can load the real version of this Server Reference.
+  const serverReference = resolveServerReference(response._serverReferenceConfig, metaData.id);
+  let promise = preloadModule(serverReference);
+  if (!promise) {
+    if (!metaData.bound) {
+      const resolvedValue = requireModule(serverReference);
+      registerBoundServerReference(resolvedValue, metaData.id, metaData.bound, response._encodeFormAction);
+      return resolvedValue;
+    } else {
+      promise = Promise.resolve(metaData.bound);
+    }
+  } else if (metaData.bound) {
+    promise = Promise.all([promise, metaData.bound]);
+  }
+  let handler;
+  if (initializingHandler) {
+    handler = initializingHandler;
+    handler.deps++;
+  } else {
+    handler = initializingHandler = {
+      parent: null,
+      chunk: null,
+      value: null,
+      reason: null,
+      deps: 1,
+      errored: false
+    };
+  }
+  function fulfill() {
+    let resolvedValue = requireModule(serverReference);
+    if (metaData.bound) {
+      // This promise is coming from us and should have initilialized by now.
+      const boundArgs = metaData.bound.value.slice(0);
+      boundArgs.unshift(null); // this
+      resolvedValue = resolvedValue.bind.apply(resolvedValue, boundArgs);
+    }
+    registerBoundServerReference(resolvedValue, metaData.id, metaData.bound, response._encodeFormAction);
+    parentObject[key] = resolvedValue;
 
-        ) {
-          id = id._payload;
-          switch (id.status) {
-            case "resolved_model":
-              initializeModelChunk(id);
-              break;
-            case "resolved_module":
-              initializeModuleChunk(id);
-          }
-          switch (id.status) {
-            case "fulfilled":
-              id = id.value;
-              break;
-            case "blocked":
-            case "pending":
-              return waitForReference(
-                id,
-                parentObject,
-                key,
-                response,
-                map,
-                reference.slice(i - 1)
-              );
-            case "halted":
-              return (
-                initializingHandler
-                  ? ((response = initializingHandler), response.deps++)
-                  : (initializingHandler = {
-                      parent: null,
-                      chunk: null,
-                      value: null,
-                      reason: null,
-                      deps: 1,
-                      errored: !1
-                    }),
-                null
-              );
-            default:
-              return (
-                initializingHandler
-                  ? ((initializingHandler.errored = !0),
-                    (initializingHandler.value = null),
-                    (initializingHandler.reason = id.reason))
-                  : (initializingHandler = {
-                      parent: null,
-                      chunk: null,
-                      value: null,
-                      reason: id.reason,
-                      deps: 0,
-                      errored: !0
-                    }),
-                null
-              );
-          }
-        }
-        id = id[reference[i]];
+    // If this is the root object for a model reference, where `handler.value`
+    // is a stale `null`, the resolved value can be used directly.
+    if (key === '' && handler.value === null) {
+      handler.value = resolvedValue;
+    }
+
+    // If the parent object is an unparsed React element tuple, we also need to
+    // update the props and owner of the parsed element object (i.e.
+    // handler.value).
+    if (parentObject[0] === REACT_ELEMENT_TYPE && typeof handler.value === 'object' && handler.value !== null && handler.value.$$typeof === REACT_ELEMENT_TYPE) {
+      const element = handler.value;
+      switch (key) {
+        case '3':
+          element.props = resolvedValue;
+          break;
       }
-      for (
-        ;
-        "object" === typeof id &&
-        null !== id &&
-        id.$$typeof === REACT_LAZY_TYPE;
+    }
+    handler.deps--;
+    if (handler.deps === 0) {
+      const chunk = handler.chunk;
+      if (chunk === null || chunk.status !== BLOCKED) {
+        return;
+      }
+      const resolveListeners = chunk.value;
+      const initializedChunk = chunk;
+      initializedChunk.status = INITIALIZED;
+      initializedChunk.value = handler.value;
+      initializedChunk.reason = null;
+      if (resolveListeners !== null) {
+        wakeChunk(response, resolveListeners, handler.value, initializedChunk);
+      }
+    }
+  }
+  function reject(error) {
+    if (handler.errored) {
+      // We've already errored. We could instead build up an AggregateError
+      // but if there are multiple errors we just take the first one like
+      // Promise.all.
+      return;
+    }
+    handler.errored = true;
+    handler.value = null;
+    handler.reason = error;
+    const chunk = handler.chunk;
+    if (chunk === null || chunk.status !== BLOCKED) {
+      return;
+    }
+    triggerErrorOnChunk(response, chunk, error);
+  }
+  promise.then(fulfill, reject);
 
-      ) {
-        reference = id._payload;
-        switch (reference.status) {
-          case "resolved_model":
-            initializeModelChunk(reference);
-            break;
-          case "resolved_module":
-            initializeModuleChunk(reference);
+  // Return a place holder value for now.
+  return null;
+}
+function resolveLazy(value) {
+  while (typeof value === 'object' && value !== null && value.$$typeof === REACT_LAZY_TYPE) {
+    const payload = value._payload;
+    if (payload.status === INITIALIZED) {
+      value = payload.value;
+      continue;
+    }
+    break;
+  }
+  return value;
+}
+function transferReferencedDebugInfo(parentChunk, referencedChunk) {
+}
+function getOutlinedModel(response, reference, parentObject, key, map) {
+  const path = reference.split(':');
+  const id = parseInt(path[0], 16);
+  const chunk = getChunk(response, id);
+  switch (chunk.status) {
+    case RESOLVED_MODEL:
+      initializeModelChunk(chunk);
+      break;
+    case RESOLVED_MODULE:
+      initializeModuleChunk(chunk);
+      break;
+  }
+  // The status might have changed after initialization.
+  switch (chunk.status) {
+    case INITIALIZED:
+      let value = chunk.value;
+      for (let i = 1; i < path.length; i++) {
+        while (typeof value === 'object' && value !== null && value.$$typeof === REACT_LAZY_TYPE) {
+          const referencedChunk = value._payload;
+          switch (referencedChunk.status) {
+            case RESOLVED_MODEL:
+              initializeModelChunk(referencedChunk);
+              break;
+            case RESOLVED_MODULE:
+              initializeModuleChunk(referencedChunk);
+              break;
+          }
+          switch (referencedChunk.status) {
+            case INITIALIZED:
+              {
+                value = referencedChunk.value;
+                break;
+              }
+            case BLOCKED:
+            case PENDING:
+              {
+                return waitForReference(referencedChunk, parentObject, key, response, map, path.slice(i - 1));
+              }
+            case HALTED:
+              {
+                // Add a dependency that will never resolve.
+                // TODO: Mark downstreams as halted too.
+                let handler;
+                if (initializingHandler) {
+                  handler = initializingHandler;
+                  handler.deps++;
+                } else {
+                  handler = initializingHandler = {
+                    parent: null,
+                    chunk: null,
+                    value: null,
+                    reason: null,
+                    deps: 1,
+                    errored: false
+                  };
+                }
+                return null;
+              }
+            default:
+              {
+                // This is an error. Instead of erroring directly, we're going to encode this on
+                // an initialization handler so that we can catch it at the nearest Element.
+                if (initializingHandler) {
+                  initializingHandler.errored = true;
+                  initializingHandler.value = null;
+                  initializingHandler.reason = referencedChunk.reason;
+                } else {
+                  initializingHandler = {
+                    parent: null,
+                    chunk: null,
+                    value: null,
+                    reason: referencedChunk.reason,
+                    deps: 0,
+                    errored: true
+                  };
+                }
+                return null;
+              }
+          }
         }
-        switch (reference.status) {
-          case "fulfilled":
-            id = reference.value;
-            continue;
+        value = value[path[i]];
+      }
+      while (typeof value === 'object' && value !== null && value.$$typeof === REACT_LAZY_TYPE) {
+        // If what we're referencing is a Lazy it must be because we inserted one as a virtual node
+        // while it was blocked by other data. If it's no longer blocked, we can unwrap it.
+        const referencedChunk = value._payload;
+        switch (referencedChunk.status) {
+          case RESOLVED_MODEL:
+            initializeModelChunk(referencedChunk);
+            break;
+          case RESOLVED_MODULE:
+            initializeModuleChunk(referencedChunk);
+            break;
+        }
+        switch (referencedChunk.status) {
+          case INITIALIZED:
+            {
+              value = referencedChunk.value;
+              continue;
+            }
         }
         break;
       }
-      return map(response, id, parentObject, key);
-    case "pending":
-    case "blocked":
-      return waitForReference(id, parentObject, key, response, map, reference);
-    case "halted":
-      return (
-        initializingHandler
-          ? ((response = initializingHandler), response.deps++)
-          : (initializingHandler = {
-              parent: null,
-              chunk: null,
-              value: null,
-              reason: null,
-              deps: 1,
-              errored: !1
-            }),
-        null
-      );
+      const chunkValue = map(response, value, parentObject, key);
+      return chunkValue;
+    case PENDING:
+    case BLOCKED:
+      return waitForReference(chunk, parentObject, key, response, map, path);
+    case HALTED:
+      {
+        // Add a dependency that will never resolve.
+        // TODO: Mark downstreams as halted too.
+        let handler;
+        if (initializingHandler) {
+          handler = initializingHandler;
+          handler.deps++;
+        } else {
+          handler = initializingHandler = {
+            parent: null,
+            chunk: null,
+            value: null,
+            reason: null,
+            deps: 1,
+            errored: false
+          };
+        }
+        return null;
+      }
     default:
-      return (
-        initializingHandler
-          ? ((initializingHandler.errored = !0),
-            (initializingHandler.value = null),
-            (initializingHandler.reason = id.reason))
-          : (initializingHandler = {
-              parent: null,
-              chunk: null,
-              value: null,
-              reason: id.reason,
-              deps: 0,
-              errored: !0
-            }),
-        null
-      );
+      // This is an error. Instead of erroring directly, we're going to encode this on
+      // an initialization handler so that we can catch it at the nearest Element.
+      if (initializingHandler) {
+        initializingHandler.errored = true;
+        initializingHandler.value = null;
+        initializingHandler.reason = chunk.reason;
+      } else {
+        initializingHandler = {
+          parent: null,
+          chunk: null,
+          value: null,
+          reason: chunk.reason,
+          deps: 0,
+          errored: true
+        };
+      }
+      // Placeholder
+      return null;
   }
 }
 function createMap(response, model) {
@@ -1364,801 +2262,929 @@ function createSet(response, model) {
   return new Set(model);
 }
 function createBlob(response, model) {
-  return new Blob(model.slice(1), { type: model[0] });
+  return new Blob(model.slice(1), {
+    type: model[0]
+  });
 }
 function createFormData(response, model) {
-  response = new FormData();
-  for (var i = 0; i < model.length; i++)
-    response.append(model[i][0], model[i][1]);
-  return response;
+  const formData = new FormData();
+  for (let i = 0; i < model.length; i++) {
+    formData.append(model[i][0], model[i][1]);
+  }
+  return formData;
 }
 function extractIterator(response, model) {
+  // $FlowFixMe[incompatible-use]: This uses raw Symbols because we're extracting from a native array.
   return model[Symbol.iterator]();
 }
 function createModel(response, model) {
   return model;
 }
 function parseModelString(response, parentObject, key, value) {
-  if ("$" === value[0]) {
-    if ("$" === value)
-      return (
-        null !== initializingHandler &&
-          "0" === key &&
-          (initializingHandler = {
-            parent: initializingHandler,
-            chunk: null,
-            value: null,
-            reason: null,
-            deps: 0,
-            errored: !1
-          }),
-        REACT_ELEMENT_TYPE
-      );
+  if (value[0] === '$') {
+    if (value === '$') {
+      // A very common symbol.
+      if (initializingHandler !== null && key === '0') {
+        // We we already have an initializing handler and we're abound to enter
+        // a new element, we need to shadow it because we're now in a new scope.
+        // This is effectively the "begin" or "push" phase of Element parsing.
+        // We'll pop later when we parse the array itself.
+        initializingHandler = {
+          parent: initializingHandler,
+          chunk: null,
+          value: null,
+          reason: null,
+          deps: 0,
+          errored: false
+        };
+      }
+      return REACT_ELEMENT_TYPE;
+    }
     switch (value[1]) {
-      case "$":
-        return value.slice(1);
-      case "L":
-        return (
-          (parentObject = parseInt(value.slice(2), 16)),
-          (response = getChunk(response, parentObject)),
-          createLazyChunkWrapper(response)
-        );
-      case "@":
-        return (
-          (parentObject = parseInt(value.slice(2), 16)),
-          getChunk(response, parentObject)
-        );
-      case "S":
-        return Symbol.for(value.slice(2));
-      case "h":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(
-            response,
-            value,
-            parentObject,
-            key,
-            loadServerReference
-          )
-        );
-      case "T":
-        parentObject = "$" + value.slice(2);
-        response = response._tempRefs;
-        if (null == response)
-          throw Error(
-            "Missing a temporary reference set but the RSC response returned a temporary reference. Pass a temporaryReference option with the set that was used with the reply."
-          );
-        return response.get(parentObject);
-      case "Q":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(response, value, parentObject, key, createMap)
-        );
-      case "W":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(response, value, parentObject, key, createSet)
-        );
-      case "B":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(response, value, parentObject, key, createBlob)
-        );
-      case "K":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(response, value, parentObject, key, createFormData)
-        );
-      case "Z":
-        return resolveErrorProd();
-      case "i":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(response, value, parentObject, key, extractIterator)
-        );
-      case "I":
-        return Infinity;
-      case "-":
-        return "$-0" === value ? -0 : -Infinity;
-      case "N":
-        return NaN;
-      case "u":
-        return;
-      case "D":
-        return new Date(Date.parse(value.slice(2)));
-      case "n":
-        return BigInt(value.slice(2));
+      case '$':
+        {
+          // This was an escaped string value.
+          return value.slice(1);
+        }
+      case 'L':
+        {
+          // Lazy node
+          const id = parseInt(value.slice(2), 16);
+          const chunk = getChunk(response, id);
+          // We create a React.lazy wrapper around any lazy values.
+          // When passed into React, we'll know how to suspend on this.
+          return createLazyChunkWrapper(chunk);
+        }
+      case '@':
+        {
+          // Promise
+          const id = parseInt(value.slice(2), 16);
+          const chunk = getChunk(response, id);
+          return chunk;
+        }
+      case 'S':
+        {
+          // Symbol
+          return Symbol.for(value.slice(2));
+        }
+      case 'h':
+        {
+          // Server Reference
+          const ref = value.slice(2);
+          return getOutlinedModel(response, ref, parentObject, key, loadServerReference);
+        }
+      case 'T':
+        {
+          // Temporary Reference
+          const reference = '$' + value.slice(2);
+          const temporaryReferences = response._tempRefs;
+          if (temporaryReferences == null) {
+            throw new Error('Missing a temporary reference set but the RSC response returned a temporary reference. ' + 'Pass a temporaryReference option with the set that was used with the reply.');
+          }
+          return readTemporaryReference(temporaryReferences, reference);
+        }
+      case 'Q':
+        {
+          // Map
+          const ref = value.slice(2);
+          return getOutlinedModel(response, ref, parentObject, key, createMap);
+        }
+      case 'W':
+        {
+          // Set
+          const ref = value.slice(2);
+          return getOutlinedModel(response, ref, parentObject, key, createSet);
+        }
+      case 'B':
+        {
+          // Blob
+          const ref = value.slice(2);
+          return getOutlinedModel(response, ref, parentObject, key, createBlob);
+        }
+      case 'K':
+        {
+          // FormData
+          const ref = value.slice(2);
+          return getOutlinedModel(response, ref, parentObject, key, createFormData);
+        }
+      case 'Z':
+        {
+          // Error
+          {
+            return resolveErrorProd();
+          }
+        }
+      case 'i':
+        {
+          // Iterator
+          const ref = value.slice(2);
+          return getOutlinedModel(response, ref, parentObject, key, extractIterator);
+        }
+      case 'I':
+        {
+          // $Infinity
+          return Infinity;
+        }
+      case '-':
+        {
+          // $-0 or $-Infinity
+          if (value === '$-0') {
+            return -0;
+          } else {
+            return -Infinity;
+          }
+        }
+      case 'N':
+        {
+          // $NaN
+          return NaN;
+        }
+      case 'u':
+        {
+          // matches "$undefined"
+          // Special encoding for `undefined` which can't be serialized as JSON otherwise.
+          return undefined;
+        }
+      case 'D':
+        {
+          // Date
+          return new Date(Date.parse(value.slice(2)));
+        }
+      case 'n':
+        {
+          // BigInt
+          return BigInt(value.slice(2));
+        }
+      case 'P':
+      case 'E':
+      case 'Y':
       default:
-        return (
-          (value = value.slice(1)),
-          getOutlinedModel(response, value, parentObject, key, createModel)
-        );
+        {
+          // We assume that anything else is a reference ID.
+          const ref = value.slice(1);
+          return getOutlinedModel(response, ref, parentObject, key, createModel);
+        }
     }
   }
   return value;
 }
-function missingCall() {
-  throw Error(
-    'Trying to call a function from "use server" but the callServer option was not implemented in your router runtime.'
-  );
+function parseModelTuple(response, value) {
+  const tuple = value;
+  if (tuple[0] === REACT_ELEMENT_TYPE) {
+    // TODO: Consider having React just directly accept these arrays as elements.
+    // Or even change the ReactElement type to be an array.
+    return createElement(response, tuple[1], tuple[2], tuple[3]);
+  }
+  return value;
 }
-function ResponseInstance(
-  bundlerConfig,
-  serverReferenceConfig,
-  moduleLoading,
-  callServer,
-  encodeFormAction,
-  nonce,
-  temporaryReferences
+function missingCall() {
+  throw new Error('Trying to call a function from "use server" but the callServer option ' + 'was not implemented in your router runtime.');
+}
+function ResponseInstance(bundlerConfig, serverReferenceConfig, moduleLoading, callServer, encodeFormAction, nonce, temporaryReferences, findSourceMapURL,
+// DEV-only
+replayConsole,
+// DEV-only
+environmentName,
+// DEV-only
+debugStartTime,
+// DEV-only
+debugEndTime,
+// DEV-only
+debugChannel // DEV-only
 ) {
-  var chunks = new Map();
+  const chunks = new Map();
   this._bundlerConfig = bundlerConfig;
   this._serverReferenceConfig = serverReferenceConfig;
   this._moduleLoading = moduleLoading;
-  this._callServer = void 0 !== callServer ? callServer : missingCall;
+  this._callServer = callServer !== undefined ? callServer : missingCall;
   this._encodeFormAction = encodeFormAction;
   this._nonce = nonce;
   this._chunks = chunks;
-  this._stringDecoder = new TextDecoder();
+  this._stringDecoder = createStringDecoder();
   this._fromJSON = null;
-  this._closed = !1;
+  this._closed = false;
   this._closedReason = null;
   this._tempRefs = temporaryReferences;
+
+  // Don't inline this call because it causes closure to outline the call above.
   this._fromJSON = createFromJSONCallback(this);
 }
-function resolveBuffer(response, id, buffer) {
-  response = response._chunks;
-  var chunk = response.get(id);
-  chunk && "pending" !== chunk.status
-    ? chunk.reason.enqueueValue(buffer)
-    : ((buffer = new ReactPromise("fulfilled", buffer, null)),
-      response.set(id, buffer));
+function createResponse(bundlerConfig, serverReferenceConfig, moduleLoading, callServer, encodeFormAction, nonce, temporaryReferences, findSourceMapURL,
+// DEV-only
+replayConsole,
+// DEV-only
+environmentName,
+// DEV-only
+debugStartTime,
+// DEV-only
+debugEndTime,
+// DEV-only
+debugChannel // DEV-only
+) {
+  return getWeakResponse(
+  // $FlowFixMe[invalid-constructor]: the shapes are exact here but Flow doesn't like constructors
+  new ResponseInstance(bundlerConfig, serverReferenceConfig, moduleLoading, callServer, encodeFormAction, nonce, temporaryReferences));
 }
-function resolveModule(response, id, model) {
-  var chunks = response._chunks,
-    chunk = chunks.get(id);
-  model = JSON.parse(model, response._fromJSON);
-  var clientReference = resolveClientReference(response._bundlerConfig, model);
-  prepareDestinationWithChunks(
-    response._moduleLoading,
-    model[1],
-    response._nonce
-  );
-  if ((model = preloadModule(clientReference))) {
-    if (chunk) {
-      var blockedChunk = chunk;
-      blockedChunk.status = "blocked";
-    } else
-      (blockedChunk = new ReactPromise("blocked", null, null)),
-        chunks.set(id, blockedChunk);
-    model.then(
-      function () {
-        return resolveModuleChunk(response, blockedChunk, clientReference);
-      },
-      function (error) {
-        return triggerErrorOnChunk(response, blockedChunk, error);
-      }
-    );
-  } else
-    chunk
-      ? resolveModuleChunk(response, chunk, clientReference)
-      : ((chunk = new ReactPromise("resolved_module", clientReference, null)),
-        chunks.set(id, chunk));
+function createStreamState(weakResponse,
+// DEV-only
+streamDebugValue // DEV-only
+) {
+  const streamState = {
+    _rowState: 0,
+    _rowID: 0,
+    _rowTag: 0,
+    _rowLength: 0,
+    _buffer: []
+  };
+  return streamState;
 }
-function resolveStream(response, id, stream, controller) {
-  var chunks = response._chunks,
-    chunk = chunks.get(id);
-  chunk
-    ? "pending" === chunk.status &&
-      ((id = chunk.value),
-      (chunk.status = "fulfilled"),
-      (chunk.value = stream),
-      (chunk.reason = controller),
-      null !== id && wakeChunk(response, id, chunk.value, chunk))
-    : ((response = new ReactPromise("fulfilled", stream, controller)),
-      chunks.set(id, response));
+function resolveModel(response, id, model, streamState) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  if (!chunk) {
+    const newChunk = createResolvedModelChunk(response, model);
+    chunks.set(id, newChunk);
+  } else {
+    resolveModelChunk(response, chunk, model);
+  }
 }
-function startReadableStream(response, id, type) {
-  var controller = null,
-    closed = !1;
-  type = new ReadableStream({
+function resolveText(response, id, text, streamState) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  if (chunk && chunk.status !== PENDING) {
+    // If we get more data to an already resolved ID, we assume that it's
+    // a stream chunk since any other row shouldn't have more than one entry.
+    const streamChunk = chunk;
+    const controller = streamChunk.reason;
+    controller.enqueueValue(text);
+    return;
+  }
+  const newChunk = createInitializedTextChunk(response, text);
+  chunks.set(id, newChunk);
+}
+function resolveBuffer(response, id, buffer, streamState) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  if (chunk && chunk.status !== PENDING) {
+    // If we get more data to an already resolved ID, we assume that it's
+    // a stream chunk since any other row shouldn't have more than one entry.
+    const streamChunk = chunk;
+    const controller = streamChunk.reason;
+    controller.enqueueValue(buffer);
+    return;
+  }
+  const newChunk = createInitializedBufferChunk(response, buffer);
+  chunks.set(id, newChunk);
+}
+function resolveModule(response, id, model, streamState) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  const clientReferenceMetadata = parseModel(response, model);
+  const clientReference = resolveClientReference(response._bundlerConfig, clientReferenceMetadata);
+  prepareDestinationForModule(response._moduleLoading, response._nonce, clientReferenceMetadata);
+
+  // TODO: Add an option to encode modules that are lazy loaded.
+  // For now we preload all modules as early as possible since it's likely
+  // that we'll need them.
+  const promise = preloadModule(clientReference);
+  if (promise) {
+    let blockedChunk;
+    if (!chunk) {
+      // Technically, we should just treat promise as the chunk in this
+      // case. Because it'll just behave as any other promise.
+      blockedChunk = createBlockedChunk();
+      chunks.set(id, blockedChunk);
+    } else {
+      // This can't actually happen because we don't have any forward
+      // references to modules.
+      blockedChunk = chunk;
+      blockedChunk.status = BLOCKED;
+    }
+    promise.then(() => resolveModuleChunk(response, blockedChunk, clientReference), error => triggerErrorOnChunk(response, blockedChunk, error));
+  } else {
+    if (!chunk) {
+      const newChunk = createResolvedModuleChunk(response, clientReference);
+      chunks.set(id, newChunk);
+    } else {
+      // This can't actually happen because we don't have any forward
+      // references to modules.
+      resolveModuleChunk(response, chunk, clientReference);
+    }
+  }
+}
+function resolveStream(response, id, stream, controller, streamState) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  if (!chunk) {
+    const newChunk = createInitializedStreamChunk(response, stream, controller);
+    chunks.set(id, newChunk);
+    return;
+  }
+  if (chunk.status !== PENDING) {
+    // We already resolved. We didn't expect to see this.
+    return;
+  }
+  const resolveListeners = chunk.value;
+  const resolvedChunk = chunk;
+  resolvedChunk.status = INITIALIZED;
+  resolvedChunk.value = stream;
+  resolvedChunk.reason = controller;
+  if (resolveListeners !== null) {
+    wakeChunk(response, resolveListeners, chunk.value, chunk);
+  }
+}
+function startReadableStream(response, id, type, streamState) {
+  let controller = null;
+  let closed = false;
+  const stream = new ReadableStream({
     type: type,
-    start: function (c) {
+    start(c) {
       controller = c;
     }
   });
-  var previousBlockedChunk = null;
-  resolveStream(response, id, type, {
-    enqueueValue: function (value) {
-      null === previousBlockedChunk
-        ? controller.enqueue(value)
-        : previousBlockedChunk.then(function () {
-            controller.enqueue(value);
-          });
-    },
-    enqueueModel: function (json) {
-      if (null === previousBlockedChunk) {
-        var chunk = new ReactPromise("resolved_model", json, response);
-        initializeModelChunk(chunk);
-        "fulfilled" === chunk.status
-          ? controller.enqueue(chunk.value)
-          : (chunk.then(
-              function (v) {
-                return controller.enqueue(v);
-              },
-              function (e) {
-                return controller.error(e);
-              }
-            ),
-            (previousBlockedChunk = chunk));
+  let previousBlockedChunk = null;
+  const flightController = {
+    enqueueValue(value) {
+      if (previousBlockedChunk === null) {
+        controller.enqueue(value);
       } else {
-        chunk = previousBlockedChunk;
-        var chunk$54 = new ReactPromise("pending", null, null);
-        chunk$54.then(
-          function (v) {
-            return controller.enqueue(v);
-          },
-          function (e) {
-            return controller.error(e);
-          }
-        );
-        previousBlockedChunk = chunk$54;
-        chunk.then(function () {
-          previousBlockedChunk === chunk$54 && (previousBlockedChunk = null);
-          resolveModelChunk(response, chunk$54, json);
+        // We're still waiting on a previous chunk so we can't enqueue quite yet.
+        previousBlockedChunk.then(function () {
+          controller.enqueue(value);
         });
       }
     },
-    close: function () {
-      if (!closed)
-        if (((closed = !0), null === previousBlockedChunk)) controller.close();
-        else {
-          var blockedChunk = previousBlockedChunk;
-          previousBlockedChunk = null;
-          blockedChunk.then(function () {
-            return controller.close();
-          });
+    enqueueModel(json) {
+      if (previousBlockedChunk === null) {
+        // If we're not blocked on any other chunks, we can try to eagerly initialize
+        // this as a fast-path to avoid awaiting them.
+        const chunk = createResolvedModelChunk(response, json);
+        initializeModelChunk(chunk);
+        const initializedChunk = chunk;
+        if (initializedChunk.status === INITIALIZED) {
+          controller.enqueue(initializedChunk.value);
+        } else {
+          chunk.then(v => controller.enqueue(v), e => controller.error(e));
+          previousBlockedChunk = chunk;
         }
+      } else {
+        // We're still waiting on a previous chunk so we can't enqueue quite yet.
+        const blockedChunk = previousBlockedChunk;
+        const chunk = createPendingChunk();
+        chunk.then(v => controller.enqueue(v), e => controller.error(e));
+        previousBlockedChunk = chunk;
+        blockedChunk.then(function () {
+          if (previousBlockedChunk === chunk) {
+            // We were still the last chunk so we can now clear the queue and return
+            // to synchronous emitting.
+            previousBlockedChunk = null;
+          }
+          resolveModelChunk(response, chunk, json);
+        });
+      }
     },
-    error: function (error) {
-      if (!closed)
-        if (((closed = !0), null === previousBlockedChunk))
-          controller.error(error);
-        else {
-          var blockedChunk = previousBlockedChunk;
-          previousBlockedChunk = null;
-          blockedChunk.then(function () {
-            return controller.error(error);
-          });
-        }
+    close(json) {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (previousBlockedChunk === null) {
+        controller.close();
+      } else {
+        const blockedChunk = previousBlockedChunk;
+        // We shouldn't get any more enqueues after this so we can set it back to null.
+        previousBlockedChunk = null;
+        blockedChunk.then(() => controller.close());
+      }
+    },
+    error(error) {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (previousBlockedChunk === null) {
+        // $FlowFixMe[incompatible-call]
+        controller.error(error);
+      } else {
+        const blockedChunk = previousBlockedChunk;
+        // We shouldn't get any more enqueues after this so we can set it back to null.
+        previousBlockedChunk = null;
+        blockedChunk.then(() => controller.error(error));
+      }
     }
-  });
+  };
+  resolveStream(response, id, stream, flightController);
 }
 function asyncIterator() {
+  // Self referencing iterator.
   return this;
 }
 function createIterator(next) {
-  next = { next: next };
-  next[ASYNC_ITERATOR] = asyncIterator;
-  return next;
+  const iterator = {
+    next: next
+    // TODO: Add return/throw as options for aborting.
+  };
+  // TODO: The iterator could inherit the AsyncIterator prototype which is not exposed as
+  // a global but exists as a prototype of an AsyncGenerator. However, it's not needed
+  // to satisfy the iterable protocol.
+  iterator[ASYNC_ITERATOR] = asyncIterator;
+  return iterator;
 }
-function startAsyncIterable(response, id, iterator) {
-  var buffer = [],
-    closed = !1,
-    nextWriteIndex = 0,
-    iterable = {};
-  iterable[ASYNC_ITERATOR] = function () {
-    var nextReadIndex = 0;
-    return createIterator(function (arg) {
-      if (void 0 !== arg)
-        throw Error(
-          "Values cannot be passed to next() of AsyncIterables passed to Client Components."
-        );
+function startAsyncIterable(response, id, iterator, streamState) {
+  const buffer = [];
+  let closed = false;
+  let nextWriteIndex = 0;
+  const flightController = {
+    enqueueValue(value) {
+      if (nextWriteIndex === buffer.length) {
+        buffer[nextWriteIndex] = createInitializedIteratorResultChunk(response, value, false);
+      } else {
+        const chunk = buffer[nextWriteIndex];
+        const resolveListeners = chunk.value;
+        const rejectListeners = chunk.reason;
+        const initializedChunk = chunk;
+        initializedChunk.status = INITIALIZED;
+        initializedChunk.value = {
+          done: false,
+          value: value
+        };
+        initializedChunk.reason = null;
+        if (resolveListeners !== null) {
+          wakeChunkIfInitialized(response, chunk, resolveListeners, rejectListeners);
+        }
+      }
+      nextWriteIndex++;
+    },
+    enqueueModel(value) {
+      if (nextWriteIndex === buffer.length) {
+        buffer[nextWriteIndex] = createResolvedIteratorResultChunk(response, value, false);
+      } else {
+        resolveIteratorResultChunk(response, buffer[nextWriteIndex], value, false);
+      }
+      nextWriteIndex++;
+    },
+    close(value) {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (nextWriteIndex === buffer.length) {
+        buffer[nextWriteIndex] = createResolvedIteratorResultChunk(response, value, true);
+      } else {
+        resolveIteratorResultChunk(response, buffer[nextWriteIndex], value, true);
+      }
+      nextWriteIndex++;
+      while (nextWriteIndex < buffer.length) {
+        // In generators, any extra reads from the iterator have the value undefined.
+        resolveIteratorResultChunk(response, buffer[nextWriteIndex++], '"$undefined"', true);
+      }
+    },
+    error(error) {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (nextWriteIndex === buffer.length) {
+        buffer[nextWriteIndex] = createPendingChunk();
+      }
+      while (nextWriteIndex < buffer.length) {
+        triggerErrorOnChunk(response, buffer[nextWriteIndex++], error);
+      }
+    }
+  };
+  const iterable = {};
+  // $FlowFixMe[cannot-write]
+  iterable[ASYNC_ITERATOR] = () => {
+    let nextReadIndex = 0;
+    return createIterator(arg => {
+      if (arg !== undefined) {
+        throw new Error('Values cannot be passed to next() of AsyncIterables passed to Client Components.');
+      }
       if (nextReadIndex === buffer.length) {
-        if (closed)
-          return new ReactPromise(
-            "fulfilled",
-            { done: !0, value: void 0 },
-            null
-          );
-        buffer[nextReadIndex] = new ReactPromise("pending", null, null);
+        if (closed) {
+          // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
+          return new ReactPromise(INITIALIZED, {
+            done: true,
+            value: undefined
+          }, null);
+        }
+        buffer[nextReadIndex] = createPendingChunk();
       }
       return buffer[nextReadIndex++];
     });
   };
-  resolveStream(
-    response,
-    id,
-    iterator ? iterable[ASYNC_ITERATOR]() : iterable,
-    {
-      enqueueValue: function (value) {
-        if (nextWriteIndex === buffer.length)
-          buffer[nextWriteIndex] = new ReactPromise(
-            "fulfilled",
-            { done: !1, value: value },
-            null
-          );
-        else {
-          var chunk = buffer[nextWriteIndex],
-            resolveListeners = chunk.value,
-            rejectListeners = chunk.reason;
-          chunk.status = "fulfilled";
-          chunk.value = { done: !1, value: value };
-          chunk.reason = null;
-          null !== resolveListeners &&
-            wakeChunkIfInitialized(
-              response,
-              chunk,
-              resolveListeners,
-              rejectListeners
-            );
-        }
-        nextWriteIndex++;
-      },
-      enqueueModel: function (value) {
-        nextWriteIndex === buffer.length
-          ? (buffer[nextWriteIndex] = createResolvedIteratorResultChunk(
-              response,
-              value,
-              !1
-            ))
-          : resolveIteratorResultChunk(
-              response,
-              buffer[nextWriteIndex],
-              value,
-              !1
-            );
-        nextWriteIndex++;
-      },
-      close: function (value) {
-        if (!closed)
-          for (
-            closed = !0,
-              nextWriteIndex === buffer.length
-                ? (buffer[nextWriteIndex] = createResolvedIteratorResultChunk(
-                    response,
-                    value,
-                    !0
-                  ))
-                : resolveIteratorResultChunk(
-                    response,
-                    buffer[nextWriteIndex],
-                    value,
-                    !0
-                  ),
-              nextWriteIndex++;
-            nextWriteIndex < buffer.length;
 
-          )
-            resolveIteratorResultChunk(
-              response,
-              buffer[nextWriteIndex++],
-              '"$undefined"',
-              !0
-            );
-      },
-      error: function (error) {
-        if (!closed)
-          for (
-            closed = !0,
-              nextWriteIndex === buffer.length &&
-                (buffer[nextWriteIndex] = new ReactPromise(
-                  "pending",
-                  null,
-                  null
-                ));
-            nextWriteIndex < buffer.length;
-
-          )
-            triggerErrorOnChunk(response, buffer[nextWriteIndex++], error);
-      }
-    }
-  );
+  // TODO: If it's a single shot iterator we can optimize memory by cleaning up the buffer after
+  // reading through the end, but currently we favor code size over this optimization.
+  resolveStream(response, id, iterator ? iterable[ASYNC_ITERATOR]() : iterable, flightController);
 }
-function resolveErrorProd() {
-  var error = Error(
-    "An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details. A digest property is included on this error instance which may provide additional details about the nature of the error."
-  );
-  error.stack = "Error: " + error.message;
+function stopStream(response, id, row) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  if (!chunk || chunk.status !== INITIALIZED) {
+    // We didn't expect not to have an existing stream;
+    return;
+  }
+  const streamChunk = chunk;
+  const controller = streamChunk.reason;
+  controller.close(row === '' ? '"$undefined"' : row);
+}
+function resolveErrorProd(response) {
+  const error = new Error('An error occurred in the Server Components render. The specific message is omitted in production' + ' builds to avoid leaking sensitive details. A digest property is included on this error instance which' + ' may provide additional details about the nature of the error.');
+  error.stack = 'Error: ' + error.message;
   return error;
 }
-function mergeBuffer(buffer, lastChunk) {
-  for (var l = buffer.length, byteLength = lastChunk.length, i = 0; i < l; i++)
-    byteLength += buffer[i].byteLength;
-  byteLength = new Uint8Array(byteLength);
-  for (var i$55 = (i = 0); i$55 < l; i$55++) {
-    var chunk = buffer[i$55];
-    byteLength.set(chunk, i);
-    i += chunk.byteLength;
+function resolveErrorModel(response, id, row, streamState) {
+  const chunks = response._chunks;
+  const chunk = chunks.get(id);
+  const errorInfo = JSON.parse(row);
+  let error;
+  {
+    error = resolveErrorProd();
   }
-  byteLength.set(lastChunk, i);
-  return byteLength;
+  error.digest = errorInfo.digest;
+  const errorWithDigest = error;
+  if (!chunk) {
+    const newChunk = createErrorChunk(response, errorWithDigest);
+    chunks.set(id, newChunk);
+  } else {
+    triggerErrorOnChunk(response, chunk, errorWithDigest);
+  }
 }
-function resolveTypedArray(
-  response,
-  id,
-  buffer,
-  lastChunk,
-  constructor,
-  bytesPerElement
-) {
-  buffer =
-    0 === buffer.length && 0 === lastChunk.byteOffset % bytesPerElement
-      ? lastChunk
-      : mergeBuffer(buffer, lastChunk);
-  constructor = new constructor(
-    buffer.buffer,
-    buffer.byteOffset,
-    buffer.byteLength / bytesPerElement
-  );
-  resolveBuffer(response, id, constructor);
+function resolveHint(response, code, model) {
+  const hintModel = parseModel(response, model);
+  dispatchHint(code, hintModel);
+}
+function mergeBuffer(buffer, lastChunk) {
+  const l = buffer.length;
+  // Count the bytes we'll need
+  let byteLength = lastChunk.length;
+  for (let i = 0; i < l; i++) {
+    byteLength += buffer[i].byteLength;
+  }
+  // Allocate enough contiguous space
+  const result = new Uint8Array(byteLength);
+  let offset = 0;
+  // Copy all the buffers into it.
+  for (let i = 0; i < l; i++) {
+    const chunk = buffer[i];
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  result.set(lastChunk, offset);
+  return result;
+}
+function resolveTypedArray(response, id, buffer, lastChunk, constructor, bytesPerElement, streamState) {
+  // If the view fits into one original buffer, we just reuse that buffer instead of
+  // copying it out to a separate copy. This means that it's not always possible to
+  // transfer these values to other threads without copying first since they may
+  // share array buffer. For this to work, it must also have bytes aligned to a
+  // multiple of a size of the type.
+  const chunk = buffer.length === 0 && lastChunk.byteOffset % bytesPerElement === 0 ? lastChunk : mergeBuffer(buffer, lastChunk);
+  // TODO: The transfer protocol of RSC is little-endian. If the client isn't little-endian
+  // we should convert it instead. In practice big endian isn't really Web compatible so it's
+  // somewhat safe to assume that browsers aren't going to run it, but maybe there's some SSR
+  // server that's affected.
+  const view = new constructor(chunk.buffer, chunk.byteOffset, chunk.byteLength / bytesPerElement);
+  resolveBuffer(response, id, view);
 }
 function processFullBinaryRow(response, streamState, id, tag, buffer, chunk) {
   switch (tag) {
-    case 65:
+    case 65 /* "A" */:
+      // We must always clone to extract it into a separate buffer instead of just a view.
       resolveBuffer(response, id, mergeBuffer(buffer, chunk).buffer);
       return;
-    case 79:
+    case 79 /* "O" */:
       resolveTypedArray(response, id, buffer, chunk, Int8Array, 1);
       return;
-    case 111:
-      resolveBuffer(
-        response,
-        id,
-        0 === buffer.length ? chunk : mergeBuffer(buffer, chunk)
-      );
+    case 111 /* "o" */:
+      resolveBuffer(response, id, buffer.length === 0 ? chunk : mergeBuffer(buffer, chunk));
       return;
-    case 85:
+    case 85 /* "U" */:
       resolveTypedArray(response, id, buffer, chunk, Uint8ClampedArray, 1);
       return;
-    case 83:
+    case 83 /* "S" */:
       resolveTypedArray(response, id, buffer, chunk, Int16Array, 2);
       return;
-    case 115:
+    case 115 /* "s" */:
       resolveTypedArray(response, id, buffer, chunk, Uint16Array, 2);
       return;
-    case 76:
+    case 76 /* "L" */:
       resolveTypedArray(response, id, buffer, chunk, Int32Array, 4);
       return;
-    case 108:
+    case 108 /* "l" */:
       resolveTypedArray(response, id, buffer, chunk, Uint32Array, 4);
       return;
-    case 71:
+    case 71 /* "G" */:
       resolveTypedArray(response, id, buffer, chunk, Float32Array, 4);
       return;
-    case 103:
+    case 103 /* "g" */:
       resolveTypedArray(response, id, buffer, chunk, Float64Array, 8);
       return;
-    case 77:
+    case 77 /* "M" */:
       resolveTypedArray(response, id, buffer, chunk, BigInt64Array, 8);
       return;
-    case 109:
+    case 109 /* "m" */:
       resolveTypedArray(response, id, buffer, chunk, BigUint64Array, 8);
       return;
-    case 86:
+    case 86 /* "V" */:
       resolveTypedArray(response, id, buffer, chunk, DataView, 1);
       return;
   }
-  streamState = response._stringDecoder;
-  for (var row = "", i = 0; i < buffer.length; i++)
-    row += streamState.decode(buffer[i], decoderOptions);
-  buffer = row += streamState.decode(chunk);
+  const stringDecoder = response._stringDecoder;
+  let row = '';
+  for (let i = 0; i < buffer.length; i++) {
+    row += readPartialStringChunk(stringDecoder, buffer[i]);
+  }
+  row += readFinalStringChunk(stringDecoder, chunk);
+  processFullStringRow(response, streamState, id, tag, row);
+}
+function processFullStringRow(response, streamState, id, tag, row) {
   switch (tag) {
-    case 73:
-      resolveModule(response, id, buffer);
-      break;
-    case 72:
-      id = buffer[0];
-      buffer = buffer.slice(1);
-      response = JSON.parse(buffer, response._fromJSON);
-      buffer = ReactDOMSharedInternals.d;
-      switch (id) {
-        case "D":
-          buffer.D(response);
-          break;
-        case "C":
-          "string" === typeof response
-            ? buffer.C(response)
-            : buffer.C(response[0], response[1]);
-          break;
-        case "L":
-          id = response[0];
-          tag = response[1];
-          3 === response.length
-            ? buffer.L(id, tag, response[2])
-            : buffer.L(id, tag);
-          break;
-        case "m":
-          "string" === typeof response
-            ? buffer.m(response)
-            : buffer.m(response[0], response[1]);
-          break;
-        case "X":
-          "string" === typeof response
-            ? buffer.X(response)
-            : buffer.X(response[0], response[1]);
-          break;
-        case "S":
-          "string" === typeof response
-            ? buffer.S(response)
-            : buffer.S(
-                response[0],
-                0 === response[1] ? void 0 : response[1],
-                3 === response.length ? response[2] : void 0
-              );
-          break;
-        case "M":
-          "string" === typeof response
-            ? buffer.M(response)
-            : buffer.M(response[0], response[1]);
+    case 73 /* "I" */:
+      {
+        resolveModule(response, id, row);
+        return;
       }
-      break;
-    case 69:
-      tag = response._chunks;
-      chunk = tag.get(id);
-      buffer = JSON.parse(buffer);
-      streamState = resolveErrorProd();
-      streamState.digest = buffer.digest;
-      chunk
-        ? triggerErrorOnChunk(response, chunk, streamState)
-        : ((response = new ReactPromise("rejected", null, streamState)),
-          tag.set(id, response));
-      break;
-    case 84:
-      response = response._chunks;
-      (tag = response.get(id)) && "pending" !== tag.status
-        ? tag.reason.enqueueValue(buffer)
-        : ((buffer = new ReactPromise("fulfilled", buffer, null)),
-          response.set(id, buffer));
-      break;
-    case 78:
-    case 68:
-    case 74:
-    case 87:
-      throw Error(
-        "Failed to read a RSC payload created by a development version of React on the server while using a production version on the client. Always use matching versions on the server and the client."
-      );
-    case 82:
-      startReadableStream(response, id, void 0);
-      break;
-    case 114:
-      startReadableStream(response, id, "bytes");
-      break;
-    case 88:
-      startAsyncIterable(response, id, !1);
-      break;
-    case 120:
-      startAsyncIterable(response, id, !0);
-      break;
-    case 67:
-      (id = response._chunks.get(id)) &&
-        "fulfilled" === id.status &&
-        id.reason.close("" === buffer ? '"$undefined"' : buffer);
-      break;
+    case 72 /* "H" */:
+      {
+        const code = row[0];
+        resolveHint(response, code, row.slice(1));
+        return;
+      }
+    case 69 /* "E" */:
+      {
+        resolveErrorModel(response, id, row);
+        return;
+      }
+    case 84 /* "T" */:
+      {
+        resolveText(response, id, row);
+        return;
+      }
+    case 78 /* "N" */:
+    case 68 /* "D" */:
+    case 74 /* "J" */:
+    case 87 /* "W" */:
+      {
+        throw new Error('Failed to read a RSC payload created by a development version of React ' + 'on the server while using a production version on the client. Always use ' + 'matching versions on the server and the client.');
+      }
+    case 82 /* "R" */:
+      {
+        startReadableStream(response, id, undefined);
+        return;
+      }
+    // Fallthrough
+    case 114 /* "r" */:
+      {
+        startReadableStream(response, id, 'bytes');
+        return;
+      }
+    // Fallthrough
+    case 88 /* "X" */:
+      {
+        startAsyncIterable(response, id, false);
+        return;
+      }
+    // Fallthrough
+    case 120 /* "x" */:
+      {
+        startAsyncIterable(response, id, true);
+        return;
+      }
+    // Fallthrough
+    case 67 /* "C" */:
+      {
+        stopStream(response, id, row);
+        return;
+      }
+    // Fallthrough
     default:
-      (tag = response._chunks),
-        (chunk = tag.get(id))
-          ? resolveModelChunk(response, chunk, buffer)
-          : ((response = new ReactPromise("resolved_model", buffer, response)),
-            tag.set(id, response));
+      /* """ "{" "[" "t" "f" "n" "0" - "9" */{
+        // We assume anything else is JSON.
+        resolveModel(response, id, row);
+        return;
+      }
   }
 }
-function createFromJSONCallback(response) {
-  return function (key, value) {
-    if ("string" === typeof value)
-      return parseModelString(response, this, key, value);
-    if ("object" === typeof value && null !== value) {
-      if (value[0] === REACT_ELEMENT_TYPE) {
-        if (
-          ((key = {
-            $$typeof: REACT_ELEMENT_TYPE,
-            type: value[1],
-            key: value[2],
-            ref: null,
-            props: value[3]
-          }),
-          null !== initializingHandler)
-        )
-          if (
-            ((value = initializingHandler),
-            (initializingHandler = value.parent),
-            value.errored)
-          )
-            (key = new ReactPromise("rejected", null, value.reason)),
-              (key = createLazyChunkWrapper(key));
-          else if (0 < value.deps) {
-            var blockedChunk = new ReactPromise("blocked", null, null);
-            value.value = key;
-            value.chunk = blockedChunk;
-            key = createLazyChunkWrapper(blockedChunk);
+function processBinaryChunk(weakResponse, streamState, chunk) {
+  const response = unwrapWeakResponse(weakResponse);
+  let i = 0;
+  let rowState = streamState._rowState;
+  let rowID = streamState._rowID;
+  let rowTag = streamState._rowTag;
+  let rowLength = streamState._rowLength;
+  const buffer = streamState._buffer;
+  const chunkLength = chunk.length;
+  while (i < chunkLength) {
+    let lastIdx = -1;
+    switch (rowState) {
+      case ROW_ID:
+        {
+          const byte = chunk[i++];
+          if (byte === 58 /* ":" */) {
+            // Finished the rowID, next we'll parse the tag.
+            rowState = ROW_TAG;
+          } else {
+            rowID = rowID << 4 | (byte > 96 ? byte - 87 : byte - 48);
           }
-      } else key = value;
-      return key;
+          continue;
+        }
+      case ROW_TAG:
+        {
+          const resolvedRowTag = chunk[i];
+          if (resolvedRowTag === 84 /* "T" */ || resolvedRowTag === 65 /* "A" */ || resolvedRowTag === 79 /* "O" */ || resolvedRowTag === 111 /* "o" */ || resolvedRowTag === 98 /* "b" */ || resolvedRowTag === 85 /* "U" */ || resolvedRowTag === 83 /* "S" */ || resolvedRowTag === 115 /* "s" */ || resolvedRowTag === 76 /* "L" */ || resolvedRowTag === 108 /* "l" */ || resolvedRowTag === 71 /* "G" */ || resolvedRowTag === 103 /* "g" */ || resolvedRowTag === 77 /* "M" */ || resolvedRowTag === 109 /* "m" */ || resolvedRowTag === 86 /* "V" */) {
+            rowTag = resolvedRowTag;
+            rowState = ROW_LENGTH;
+            i++;
+          } else if (resolvedRowTag > 64 && resolvedRowTag < 91 /* "A"-"Z" */ || resolvedRowTag === 35 /* "#" */ || resolvedRowTag === 114 /* "r" */ || resolvedRowTag === 120 /* "x" */) {
+            rowTag = resolvedRowTag;
+            rowState = ROW_CHUNK_BY_NEWLINE;
+            i++;
+          } else {
+            rowTag = 0;
+            rowState = ROW_CHUNK_BY_NEWLINE;
+            // This was an unknown tag so it was probably part of the data.
+          }
+          continue;
+        }
+      case ROW_LENGTH:
+        {
+          const byte = chunk[i++];
+          if (byte === 44 /* "," */) {
+            // Finished the rowLength, next we'll buffer up to that length.
+            rowState = ROW_CHUNK_BY_LENGTH;
+          } else {
+            rowLength = rowLength << 4 | (byte > 96 ? byte - 87 : byte - 48);
+          }
+          continue;
+        }
+      case ROW_CHUNK_BY_NEWLINE:
+        {
+          // We're looking for a newline
+          lastIdx = chunk.indexOf(10 /* "\n" */, i);
+          break;
+        }
+      case ROW_CHUNK_BY_LENGTH:
+        {
+          // We're looking for the remaining byte length
+          lastIdx = i + rowLength;
+          if (lastIdx > chunk.length) {
+            lastIdx = -1;
+          }
+          break;
+        }
+    }
+    const offset = chunk.byteOffset + i;
+    if (lastIdx > -1) {
+      // We found the last chunk of the row
+      const length = lastIdx - i;
+      const lastChunk = new Uint8Array(chunk.buffer, offset, length);
+
+      // Check if this is a Uint8Array for a byte stream. We enqueue it
+      // immediately but need to determine if we can use zero-copy or must copy.
+      if (rowTag === 98 /* "b" */) {
+        resolveBuffer(response, rowID,
+        // If we're at the end of the RSC chunk, no more parsing will access
+        // this buffer and we don't need to copy the chunk to allow detaching
+        // the buffer, otherwise we need to copy.
+        lastIdx === chunkLength ? lastChunk : lastChunk.slice());
+      } else {
+        // Process all other row types.
+        processFullBinaryRow(response, streamState, rowID, rowTag, buffer, lastChunk);
+      }
+
+      // Reset state machine for a new row
+      i = lastIdx;
+      if (rowState === ROW_CHUNK_BY_NEWLINE) {
+        // If we're trailing by a newline we need to skip it.
+        i++;
+      }
+      rowState = ROW_ID;
+      rowTag = 0;
+      rowID = 0;
+      rowLength = 0;
+      buffer.length = 0;
+    } else {
+      // The rest of this row is in a future chunk.
+      const length = chunk.byteLength - i;
+      const remainingSlice = new Uint8Array(chunk.buffer, offset, length);
+
+      // For byte streams, we can enqueue the partial row immediately without
+      // copying since we're at the end of the RSC chunk and no more parsing
+      // will access this buffer.
+      if (rowTag === 98 /* "b" */) {
+        // Update how many bytes we're still waiting for. We need to do this
+        // before enqueueing, as enqueue will detach the buffer and byteLength
+        // will become 0.
+        rowLength -= remainingSlice.byteLength;
+        resolveBuffer(response, rowID, remainingSlice);
+      } else {
+        // For other row types, stash the rest of the current chunk until we can
+        // process the full row.
+        buffer.push(remainingSlice);
+        // Update how many bytes we're still waiting for. If we're looking for
+        // a newline, this doesn't hurt since we'll just ignore it.
+        rowLength -= remainingSlice.byteLength;
+      }
+      break;
+    }
+  }
+  streamState._rowState = rowState;
+  streamState._rowID = rowID;
+  streamState._rowTag = rowTag;
+  streamState._rowLength = rowLength;
+}
+function parseModel(response, json) {
+  return JSON.parse(json, response._fromJSON);
+}
+function createFromJSONCallback(response) {
+  // $FlowFixMe[missing-this-annot]
+  return function (key, value) {
+    if (typeof value === 'string') {
+      // We can't use .bind here because we need the "this" value.
+      return parseModelString(response, this, key, value);
+    }
+    if (typeof value === 'object' && value !== null) {
+      return parseModelTuple(response, value);
     }
     return value;
   };
 }
 function close(weakResponse) {
-  reportGlobalError(weakResponse, Error("Connection closed."));
+  // In case there are any remaining unresolved chunks, they won't
+  // be resolved now. So we need to issue an error to those.
+  // Ideally we should be able to early bail out if we kept a
+  // ref count of pending chunks.
+  reportGlobalError(weakResponse, new Error('Connection closed.'));
 }
+
 function noServerCall() {
-  throw Error(
-    "Server Functions cannot be called during initial render. This would create a fetch waterfall. Try to use a Server Component to pass data to Client Components instead."
-  );
+  throw new Error('Server Functions cannot be called during initial render. ' + 'This would create a fetch waterfall. Try to use a Server Component ' + 'to pass data to Client Components instead.');
+}
+function createServerReference(id, callServer) {
+  return createServerReference$1(id, noServerCall);
 }
 function createResponseFromOptions(options) {
-  return new ResponseInstance(
-    options.serverConsumerManifest.moduleMap,
-    options.serverConsumerManifest.serverModuleMap,
-    options.serverConsumerManifest.moduleLoading,
-    noServerCall,
-    options.encodeFormAction,
-    "string" === typeof options.nonce ? options.nonce : void 0,
-    options && options.temporaryReferences
-      ? options.temporaryReferences
-      : void 0
-  );
+  return createResponse(options.serverConsumerManifest.moduleMap, options.serverConsumerManifest.serverModuleMap, options.serverConsumerManifest.moduleLoading, noServerCall, options.encodeFormAction, typeof options.nonce === 'string' ? options.nonce : undefined, options && options.temporaryReferences ? options.temporaryReferences : undefined);
 }
-function startReadingFromStream(response, stream, onDone) {
+function startReadingFromStream(response, stream, onDone, debugValue) {
+  const streamState = createStreamState();
+  const reader = stream.getReader();
   function progress(_ref) {
-    var value = _ref.value;
-    if (_ref.done) return onDone();
-    var i = 0,
-      rowState = streamState._rowState;
-    _ref = streamState._rowID;
-    for (
-      var rowTag = streamState._rowTag,
-        rowLength = streamState._rowLength,
-        buffer = streamState._buffer,
-        chunkLength = value.length;
-      i < chunkLength;
-
-    ) {
-      var lastIdx = -1;
-      switch (rowState) {
-        case 0:
-          lastIdx = value[i++];
-          58 === lastIdx
-            ? (rowState = 1)
-            : (_ref =
-                (_ref << 4) | (96 < lastIdx ? lastIdx - 87 : lastIdx - 48));
-          continue;
-        case 1:
-          rowState = value[i];
-          84 === rowState ||
-          65 === rowState ||
-          79 === rowState ||
-          111 === rowState ||
-          98 === rowState ||
-          85 === rowState ||
-          83 === rowState ||
-          115 === rowState ||
-          76 === rowState ||
-          108 === rowState ||
-          71 === rowState ||
-          103 === rowState ||
-          77 === rowState ||
-          109 === rowState ||
-          86 === rowState
-            ? ((rowTag = rowState), (rowState = 2), i++)
-            : (64 < rowState && 91 > rowState) ||
-                35 === rowState ||
-                114 === rowState ||
-                120 === rowState
-              ? ((rowTag = rowState), (rowState = 3), i++)
-              : ((rowTag = 0), (rowState = 3));
-          continue;
-        case 2:
-          lastIdx = value[i++];
-          44 === lastIdx
-            ? (rowState = 4)
-            : (rowLength =
-                (rowLength << 4) |
-                (96 < lastIdx ? lastIdx - 87 : lastIdx - 48));
-          continue;
-        case 3:
-          lastIdx = value.indexOf(10, i);
-          break;
-        case 4:
-          (lastIdx = i + rowLength), lastIdx > value.length && (lastIdx = -1);
-      }
-      var offset = value.byteOffset + i;
-      if (-1 < lastIdx)
-        (rowLength = new Uint8Array(value.buffer, offset, lastIdx - i)),
-          98 === rowTag
-            ? resolveBuffer(
-                response,
-                _ref,
-                lastIdx === chunkLength ? rowLength : rowLength.slice()
-              )
-            : processFullBinaryRow(
-                response,
-                streamState,
-                _ref,
-                rowTag,
-                buffer,
-                rowLength
-              ),
-          (i = lastIdx),
-          3 === rowState && i++,
-          (rowLength = _ref = rowTag = rowState = 0),
-          (buffer.length = 0);
-      else {
-        value = new Uint8Array(value.buffer, offset, value.byteLength - i);
-        98 === rowTag
-          ? ((rowLength -= value.byteLength),
-            resolveBuffer(response, _ref, value))
-          : (buffer.push(value), (rowLength -= value.byteLength));
-        break;
-      }
+    let done = _ref.done,
+      value = _ref.value;
+    if (done) {
+      return onDone();
     }
-    streamState._rowState = rowState;
-    streamState._rowID = _ref;
-    streamState._rowTag = rowTag;
-    streamState._rowLength = rowLength;
+    const buffer = value;
+    processBinaryChunk(response, streamState, buffer);
     return reader.read().then(progress).catch(error);
   }
   function error(e) {
     reportGlobalError(response, e);
   }
-  var streamState = {
-      _rowState: 0,
-      _rowID: 0,
-      _rowTag: 0,
-      _rowLength: 0,
-      _buffer: []
-    },
-    reader = stream.getReader();
   reader.read().then(progress).catch(error);
 }
-exports.createFromFetch = function (promiseForResponse, options) {
-  var response = createResponseFromOptions(options);
-  promiseForResponse.then(
-    function (r) {
+function createFromReadableStream(stream, options) {
+  const response = createResponseFromOptions(options);
+  {
+    startReadingFromStream(response, stream, close.bind(null, response));
+  }
+  return getRoot(response);
+}
+function createFromFetch(promiseForResponse, options) {
+  const response = createResponseFromOptions(options);
+  promiseForResponse.then(function (r) {
+    {
       startReadingFromStream(response, r.body, close.bind(null, response));
-    },
-    function (e) {
-      reportGlobalError(response, e);
     }
-  );
-  return getChunk(response, 0);
-};
-exports.createFromReadableStream = function (stream, options) {
-  options = createResponseFromOptions(options);
-  startReadingFromStream(options, stream, close.bind(null, options));
-  return getChunk(options, 0);
-};
-exports.createServerReference = function (id) {
-  return createServerReference$1(id, noServerCall);
-};
-exports.createTemporaryReferenceSet = function () {
-  return new Map();
-};
-exports.encodeReply = function (value, options) {
-  return new Promise(function (resolve, reject) {
-    var abort = processReply(
-      value,
-      "",
-      options && options.temporaryReferences
-        ? options.temporaryReferences
-        : void 0,
-      resolve,
-      reject
-    );
+  }, function (e) {
+    reportGlobalError(response, e);
+  });
+  return getRoot(response);
+}
+function encodeReply(value, options) /* We don't use URLSearchParams yet but maybe */{
+  return new Promise((resolve, reject) => {
+    const abort = processReply(value, '', options && options.temporaryReferences ? options.temporaryReferences : undefined, resolve, reject);
     if (options && options.signal) {
-      var signal = options.signal;
-      if (signal.aborted) abort(signal.reason);
-      else {
-        var listener = function () {
+      const signal = options.signal;
+      if (signal.aborted) {
+        abort(signal.reason);
+      } else {
+        const listener = () => {
           abort(signal.reason);
-          signal.removeEventListener("abort", listener);
+          signal.removeEventListener('abort', listener);
         };
-        signal.addEventListener("abort", listener);
+        signal.addEventListener('abort', listener);
       }
     }
   });
-};
-exports.registerServerReference = function (reference, id, encodeFormAction) {
-  registerBoundServerReference(reference, id, null, encodeFormAction);
-  return reference;
-};
+}
+
+exports.createFromFetch = createFromFetch;
+exports.createFromReadableStream = createFromReadableStream;
+exports.createServerReference = createServerReference;
+exports.createTemporaryReferenceSet = createTemporaryReferenceSet;
+exports.encodeReply = encodeReply;
+exports.registerServerReference = registerServerReference;
