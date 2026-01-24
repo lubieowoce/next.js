@@ -12,6 +12,9 @@ export default async function Page() {
           <DebugLinkMPA href="/runtime/suspense-around-dynamic" />
         </li>
         <li>
+          <DebugLinkMPA href="/runtime/no-suspense-around-params/123" />
+        </li>
+        <li>
           <DebugLinkMPA href="/runtime/missing-suspense-around-dynamic" />
         </li>
         <li>
@@ -29,6 +32,9 @@ export default async function Page() {
         </li>
         <li>
           <DebugLinkMPA href="/static/missing-suspense-around-dynamic" />
+        </li>
+        <li>
+          <DebugLinkMPA href="/static/missing-suspense-around-params/123" />
         </li>
         <li>
           <DebugLinkMPA href="/static/missing-suspense-around-dynamic-layout" />

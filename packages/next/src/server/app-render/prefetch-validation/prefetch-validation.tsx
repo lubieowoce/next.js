@@ -3,7 +3,6 @@ import type {
   FlightRouterState,
   HeadData,
   InitialRSCPayload,
-  LoadingModuleData,
   Segment,
 } from '../../../shared/lib/app-router-types'
 import { InvariantError } from '../../../shared/lib/invariant-error'
@@ -36,6 +35,7 @@ import {
   createNodeStreamFromChunks,
 } from './utils'
 import { createDebugChannel } from '../debug-channel-server'
+import { inspect } from 'node:util'
 
 type StageChunks = Record<SegmentStage, Uint8Array[]>
 
@@ -558,6 +558,7 @@ export type ValidationRouteTree = {
     prefetchConfig: Prefetch | null
     conventionPath: string
   }
+
   slots: { [parallelRouteKey: string]: ValidationRouteTree } | null
 }
 
@@ -569,25 +570,23 @@ export async function createValidationRouteTree(
   const segmentsWithPrefetchConfigs: SegmentPath[] = []
   const treeNodes = new Map<SegmentPath, ValidationRouteTree>()
 
-  function getSegment(rawSegment: string): Segment {
-    const dynamicParam = getDynamicParamFromSegment(rawSegment)
-    return dynamicParam ? dynamicParam.treeSegment : rawSegment
+  function getSegment(loaderTree: LoaderTree): Segment {
+    const dynamicParam = getDynamicParamFromSegment(loaderTree)
+    return dynamicParam ? dynamicParam.treeSegment : loaderTree[0]
   }
+
+  console.log(inspect(rootLoaderTree, { colors: true, depth: undefined }))
 
   async function visit(
     loaderTree: LoaderTree,
     parentPath: SegmentPath | null,
     key: string | null
   ): Promise<ValidationRouteTree> {
-    const {
-      segment: rawSegment,
-      conventionPath,
-      parallelRoutes,
-    } = parseLoaderTree(loaderTree)
+    const { conventionPath, parallelRoutes } = parseLoaderTree(loaderTree)
     const { mod: layoutOrPageMod, modType } =
       await getLayoutOrPageModule(loaderTree)
 
-    const segment = getSegment(rawSegment)
+    const segment = getSegment(loaderTree)
     const segmentPath =
       parentPath === null
         ? stringifySegment(segment)
@@ -616,10 +615,29 @@ export async function createValidationRouteTree(
       if (modType === 'layout') {
         // TODO(prefetch-validation): technically we should only validate *shared* layouts,
         // but we have no way of knowing that here
-        // NOTE: we should always have at least the parent layout of __PAGE__ even if it's not shared,
-        // to validate `__PAGE__?p=foo -> __PAGE__?p=bar`
         navigationParents.push(segmentPath)
+      } else if (modType === 'page') {
+        if (parentPath === null) {
+          throw new InvariantError('A page must have a root layout')
+        }
+
+        // If the page itself has a prefetch config, then
+        // make sure we always validate a navigation from its parent
+        // to ensure `__PAGE__?p=foo -> __PAGE__?p=bar` works.
+        //
+        // This is relevant if the parent layout is implicit, as in
+        //   my-segment/
+        //     loading.tsx
+        //     page.tsx
+        // because the above code for layouts wouldn't add it.
+        // TODO: what if this is runtime-prefetched? how does that affect a search-param navigation?
+        // TODO: this can cause double validation if the parent segment is empty
+        //       but we have a parent layout that'd be validated
+        if (prefetchConfig && !navigationParents.includes(parentPath)) {
+          navigationParents.push(parentPath)
+        }
       }
+
       if (prefetchConfig && typeof prefetchConfig === 'object') {
         segmentsWithPrefetchConfigs.push(segmentPath)
       }
@@ -833,6 +851,7 @@ function createValidationSeedData(
       parentState.kind === 'shared-tree'
 
     if (isValidationBoundary) {
+      console.log(`adding validation boundary around '${path}'`)
       segmentData = {
         ...segmentData,
         node: (
@@ -874,17 +893,15 @@ function createValidationSeedData(
 /** An object version of `CacheNodeSeedData`, without slots. */
 type SegmentData = {
   node: React.ReactNode | null
-  loading: LoadingModuleData | Promise<LoadingModuleData>
   isPartial: boolean
   hasRuntimePrefetch: boolean
 }
 
 function createSegmentData(seedData: CacheNodeSeedData): SegmentData {
-  const [node, _parallelRoutesData, loading, isPartial, hasRuntimePrefetch] =
+  const [node, _parallelRoutesData, _unused, isPartial, hasRuntimePrefetch] =
     seedData
   return {
     node,
-    loading,
     isPartial,
     hasRuntimePrefetch,
   }
@@ -898,7 +915,7 @@ function getCacheNodeSeedDataFromSegment(
   return [
     data.node,
     slots,
-    data.loading,
+    /* unused (previously `loading`) */ null,
     data.isPartial,
     data.hasRuntimePrefetch,
   ]

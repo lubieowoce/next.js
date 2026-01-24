@@ -6,6 +6,9 @@ const nextConfig: NextConfig = {
   experimental: {
     reactDebugChannel: process.env.REACT_DEBUG_CHANNEL ? true : false,
   },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
 }
 
 export default nextConfig

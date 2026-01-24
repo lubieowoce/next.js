@@ -986,5 +986,6 @@
   "985": "createDebugFriendlyNodeStreamFromChunks cannot be used in the edge runtime",
   "986": "Missing segment data: %s",
   "987": "Unexpected state while traversing route tree: %s",
-  "988": "Unexpected `export const unstable_prefetch = false` in new tree"
+  "988": "Unexpected `export const unstable_prefetch = false` in new tree",
+  "989": "A page must have a root layout"
 }

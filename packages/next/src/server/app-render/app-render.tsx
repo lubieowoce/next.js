@@ -4205,7 +4205,7 @@ async function validatePrefetchConfigs(
   // }
 
   const getConventionPath = (segmentPath: ValidationSegmentPath) =>
-    treeNodes.get(segmentPath)!.module!.conventionPath
+    treeNodes.get(segmentPath)?.module?.conventionPath
 
   for (const navigationParent of navigationParents) {
     // TODO(prefetch-validation): report which segment had errors

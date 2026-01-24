@@ -1,11 +1,10 @@
-// import { cookies } from 'next/headers'
+import { connection } from 'next/server'
 import { ReactNode } from 'react'
 
 export const unstable_prefetch = false
 
 export default async function Layout({ children }: { children: ReactNode }) {
-  // await cookies()
-  await new Promise((resolve) => setTimeout(resolve, 1000))
+  await connection()
   return (
     <>
       <div>This layout blocks the children</div>
