@@ -159,6 +159,7 @@ export type StageEndTimes = {
 export async function collectStagedSegmentData(
   stageChunks: StageChunks,
   debugChunks: Uint8Array[] | null,
+  startTime: number,
   hasRuntimePrefetch: boolean,
   clientReferenceManifest: ClientReferenceManifest,
   renderToReadableStream: typeof import('react-server-dom-webpack/server').renderToReadableStream
@@ -242,6 +243,7 @@ export async function collectStagedSegmentData(
               filterStackFrame,
               debugChannel: segmentDebugChannel?.serverSide,
               environmentName,
+              startTime,
               onError(error: unknown) {
                 const digest = getDigestForWellKnownError(error)
                 if (digest) {
@@ -383,6 +385,7 @@ export async function createCombinedPayloadStream(
   navigationParent: SegmentPath,
   signal: AbortSignal,
   clientReferenceManifest: ClientReferenceManifest,
+  startTime: number,
   stageEndTimes: StageEndTimes,
   isDebugChannelEnabled: boolean,
   usedSegmentKinds: Set<SegmentStage>
@@ -420,6 +423,7 @@ export async function createCombinedPayloadStream(
           {
             filterStackFrame,
             debugChannel: debugChannel?.serverSide,
+            startTime,
             onError(error: unknown) {
               const digest = getDigestForWellKnownError(error)
               if (digest) {

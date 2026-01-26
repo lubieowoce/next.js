@@ -3294,6 +3294,7 @@ async function renderWithRestartOnCacheMissInDev(
             {
               onError,
               environmentName,
+              startTime,
               filterStackFrame,
               debugChannel: debugChannel?.serverSide,
               signal: initialReactController.signal,
@@ -3449,6 +3450,7 @@ async function renderWithRestartOnCacheMissInDev(
           {
             onError,
             environmentName,
+            startTime,
             filterStackFrame,
             debugChannel: debugChannel?.serverSide,
           }
@@ -3662,7 +3664,7 @@ async function spawnStaticShellValidationInDev(
   accumulatedChunksPromise: Promise<AccumulatedStreamChunks>,
   staticInterruptReason: Error | null,
   runtimeInterruptReason: Error | null,
-  _startTime: number,
+  startTime: number,
   staticStageEndTime: number,
   runtimeStageEndTime: number,
   ctx: AppRenderContext,
@@ -3725,6 +3727,7 @@ async function spawnStaticShellValidationInDev(
     const prefetchConfigsResult = await validatePrefetchConfigs(
       accumulatedChunks,
       debugChunks,
+      startTime,
       rootParams,
       fallbackRouteParams,
       allowEmptyStaticShell,
@@ -4095,6 +4098,7 @@ async function validateStagedShell(
 async function validatePrefetchConfigs(
   accumulatedChunks: AccumulatedStreamChunks,
   debugChunks: null | Array<Uint8Array>,
+  startTime: number,
   rootParams: Params,
   fallbackRouteParams: OpaqueFallbackRouteParams | null,
   allowEmptyStaticShell: boolean,
@@ -4143,6 +4147,7 @@ async function validatePrefetchConfigs(
       [RenderStage.Dynamic]: accumulatedChunks.dynamicChunks,
     },
     debugChunks,
+    startTime,
     hasRuntimePrefetch,
     clientReferenceManifest,
     ctx.componentMod.renderToReadableStream
@@ -4218,6 +4223,7 @@ async function validatePrefetchConfigs(
     const results = await validatePrefetchConfig(
       initialRscPayload,
       cache,
+      startTime,
       stageEndTimes,
       rootParams,
       fallbackRouteParams,
@@ -4245,6 +4251,7 @@ async function validatePrefetchConfigs(
 async function validatePrefetchConfig(
   initialRscPayload: InitialRSCPayload,
   cache: ValidationSegmentCache,
+  startTime: number,
   stageEndTimes: StageEndTimes,
   rootParams: Params,
   fallbackRouteParams: OpaqueFallbackRouteParams | null,
@@ -4304,6 +4311,7 @@ async function validatePrefetchConfig(
       navigationParent,
       clientReactController.signal, // release chunks before the abort
       clientReferenceManifest,
+      startTime,
       stageEndTimes,
       isDebugChannelEnabled,
       usedSegmentKinds
