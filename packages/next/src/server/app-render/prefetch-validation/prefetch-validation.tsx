@@ -418,7 +418,6 @@ export async function createCombinedPayloadStream(
           payload,
           clientReferenceManifest.clientModules,
           {
-            environmentName: 'Replay 3',
             filterStackFrame,
             debugChannel: debugChannel?.serverSide,
             onError(error: unknown) {
