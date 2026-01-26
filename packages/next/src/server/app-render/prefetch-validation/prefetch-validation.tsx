@@ -35,7 +35,6 @@ import {
   createNodeStreamFromChunks,
 } from './utils'
 import { createDebugChannel } from '../debug-channel-server'
-import { inspect } from 'node:util'
 
 type StageChunks = Record<SegmentStage, Uint8Array[]>
 
@@ -578,12 +577,12 @@ export async function createValidationRouteTree(
     return dynamicParam ? dynamicParam.treeSegment : loaderTree[0]
   }
 
-  console.log(inspect(rootLoaderTree, { colors: true, depth: undefined }))
-
   async function visit(
     loaderTree: LoaderTree,
     parentPath: SegmentPath | null,
-    key: string | null
+    key: string | null,
+    isInsideRootLayout: boolean,
+    isInsideParallelSlot: boolean
   ): Promise<ValidationRouteTree> {
     const { conventionPath, parallelRoutes } = parseLoaderTree(loaderTree)
     const { mod: layoutOrPageMod, modType } =
@@ -595,6 +594,10 @@ export async function createValidationRouteTree(
         ? stringifySegment(segment)
         : createChildSegmentPath(parentPath, key!, segment)
 
+    // NOTE: We've already validated the presence of root layouts for each page,
+    // so we don't need to consider `modType === 'page'` here
+    const isRootLayout = !isInsideRootLayout && modType === 'layout'
+
     let moduleInfo: ValidationRouteTree['module'] = null
     if (layoutOrPageMod !== undefined) {
       // TODO(restart-on-cache-miss): Does this work correctly for client page/layout modules?
@@ -605,55 +608,82 @@ export async function createValidationRouteTree(
         prefetchConfig,
         conventionPath: conventionPath!,
       }
-      if (
-        prefetchConfig === false &&
-        // HACK: only consider `false` in `children`
-        !segmentPath.includes('@')
-      ) {
-        // TODO(prefetch-validation): what are the semantics of nested `unstable_prefetch = false`?
-        // right now, this'll mean we only validate from the innermost one with `false`, which is not a lot.
-        navigationParents.length = 0
-      }
 
-      if (modType === 'layout') {
-        // TODO(prefetch-validation): technically we should only validate *shared* layouts,
-        // but we have no way of knowing that here
-        navigationParents.push(segmentPath)
-      } else if (modType === 'page') {
-        if (parentPath === null) {
-          throw new InvariantError('A page must have a root layout')
+      if (isRootLayout) {
+        // For now, root layouts can only have a static `unstable_prefetch`.
+        // Once we adjust build-time logic to accept `unstable_prefetch = false` as an opt-in to blocking,
+        // we can allow `false` as well.
+        if (
+          prefetchConfig !== null &&
+          !(
+            typeof prefetchConfig === 'object' &&
+            prefetchConfig.mode === 'static'
+          )
+        ) {
+          throw new Error(
+            `Found non-static \`unstable_prefetch\` in "${conventionPath}". This is not supported yet.`
+          )
+        }
+      } else if (isInsideParallelSlot) {
+        // For now, we ignore parallel routes for purposes of finding configs to validate
+        // and finding shared layout parents.
+        if (prefetchConfig !== null) {
+          console.error(
+            `Found \`unstable_prefetch\` in "${conventionPath}". \`unstable_prefetch\` validation is not fully implemented for parallel routes yet.`
+          )
+        }
+      } else {
+        if (prefetchConfig === false) {
+          // TODO(prefetch-validation): what are the semantics of nested `unstable_prefetch = false`?
+          // right now, this'll mean we only validate from the innermost one with `false`, which is not a lot.
+          navigationParents.length = 0
         }
 
-        // If the page itself has a prefetch config, then
-        // make sure we always validate a navigation from its parent
-        // to ensure `__PAGE__?p=foo -> __PAGE__?p=bar` works.
-        //
-        // This is relevant if the parent layout is implicit, as in
-        //   my-segment/
-        //     loading.tsx
-        //     page.tsx
-        // because the above code for layouts wouldn't add it.
-        // TODO: what if this is runtime-prefetched? how does that affect a search-param navigation?
-        // TODO: this can cause double validation if the parent segment is empty
-        //       but we have a parent layout that'd be validated
-        if (prefetchConfig && !navigationParents.includes(parentPath)) {
-          navigationParents.push(parentPath)
-        }
-      }
+        if (modType === 'layout') {
+          // TODO(prefetch-validation): technically we should only validate *shared* layouts,
+          // but we have no way of knowing that here
+          navigationParents.push(segmentPath)
+        } else if (modType === 'page') {
+          if (parentPath === null) {
+            throw new InvariantError('A page must have a root layout')
+          }
 
-      if (prefetchConfig && typeof prefetchConfig === 'object') {
-        segmentsWithPrefetchConfigs.push(segmentPath)
+          // If the page itself has a prefetch config, then
+          // make sure we always validate a navigation from its parent
+          // to ensure `__PAGE__?p=foo -> __PAGE__?p=bar` works.
+          //
+          // This is relevant if the parent layout is implicit, as in
+          //   my-segment/
+          //     loading.tsx
+          //     page.tsx
+          // because the above code for layouts wouldn't add it.
+          // TODO: what if this is runtime-prefetched? how does that affect a search-param navigation?
+          // TODO: this can cause double validation if the parent segment is empty
+          //       but we have a parent layout that'd be validated
+          if (prefetchConfig && !navigationParents.includes(parentPath)) {
+            navigationParents.push(parentPath)
+          }
+        }
+
+        if (prefetchConfig && typeof prefetchConfig === 'object') {
+          segmentsWithPrefetchConfigs.push(segmentPath)
+        }
       }
     }
 
     let slots: ValidationRouteTree['slots'] = null
     for (const parallelRouteKey in parallelRoutes) {
       const childLoaderTree = parallelRoutes[parallelRouteKey]
+      const isChildInsideRootLayout = isInsideRootLayout || isRootLayout
+      const isChildInParallelSlot =
+        isInsideParallelSlot || parallelRouteKey !== 'children'
       slots ??= {}
       slots[parallelRouteKey] = await visit(
         childLoaderTree,
         segmentPath,
-        parallelRouteKey
+        parallelRouteKey,
+        isChildInsideRootLayout,
+        isChildInParallelSlot
       )
     }
 
@@ -667,7 +697,7 @@ export async function createValidationRouteTree(
     return treeNode
   }
 
-  const routeTree = await visit(rootLoaderTree, null, null)
+  const routeTree = await visit(rootLoaderTree, null, null, false, false)
   return {
     tree: routeTree,
     treeNodes,

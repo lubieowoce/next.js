@@ -4108,19 +4108,22 @@ async function validatePrefetchConfigs(
   const { createValidationRouteTree, collectStagedSegmentData } =
     ctx.componentMod.prefetchValidation!
 
+  let init: Awaited<ReturnType<typeof createValidationRouteTree>>
+  // We throw for invalid configurations, so errors should be surfaced.
+  try {
+    init = await createValidationRouteTree(
+      ctx.componentMod.routeModule.userland.loaderTree,
+      ctx.getDynamicParamFromSegment
+    )
+  } catch (err) {
+    return [err]
+  }
   const {
     tree: validationRouteTree,
     treeNodes,
     navigationParents,
     segmentsWithPrefetchConfigs,
-  } = await createValidationRouteTree(
-    ctx.componentMod.routeModule.userland.loaderTree,
-    ctx.getDynamicParamFromSegment
-  )
-  // console.log(
-  //   'tree:\n' + inspect(validationRouteTree, { depth: undefined, colors: true })
-  // )
-  // console.log('segments to validate:', segmentsToValidate)
+  } = init
 
   // If we don't have any prefetch configs in the tree, we can bail out early.
   if (segmentsWithPrefetchConfigs.length === 0) {

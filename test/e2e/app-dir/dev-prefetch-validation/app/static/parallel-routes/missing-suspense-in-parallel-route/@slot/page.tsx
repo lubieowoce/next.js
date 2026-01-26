@@ -1,8 +1,10 @@
 import { cookies } from 'next/headers'
 
-export default async function Slot() {
+export default async function IndexSlot() {
   await cookies()
   return (
-    <p>This is a parallel layout slot that awaits cookies() without Suspense</p>
+    <p style={{ color: 'green' }}>
+      This is a parallel layout slot that awaits cookies() without Suspense
+    </p>
   )
 }
