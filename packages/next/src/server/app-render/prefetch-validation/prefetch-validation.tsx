@@ -581,7 +581,7 @@ export async function createValidationRouteTree(
     loaderTree: LoaderTree,
     parentPath: SegmentPath | null,
     key: string | null,
-    isInsideRootLayout: boolean,
+    parentLayoutPath: SegmentPath | null,
     isInsideParallelSlot: boolean
   ): Promise<ValidationRouteTree> {
     const { conventionPath, parallelRoutes } = parseLoaderTree(loaderTree)
@@ -596,7 +596,7 @@ export async function createValidationRouteTree(
 
     // NOTE: We've already validated the presence of root layouts for each page,
     // so we don't need to consider `modType === 'page'` here
-    const isRootLayout = !isInsideRootLayout && modType === 'layout'
+    const isRootLayout = parentLayoutPath === null && modType === 'layout'
 
     let moduleInfo: ValidationRouteTree['module'] = null
     if (layoutOrPageMod !== undefined) {
@@ -624,6 +624,7 @@ export async function createValidationRouteTree(
             `Found non-static \`unstable_prefetch\` in "${conventionPath}". This is not supported yet.`
           )
         }
+        navigationParents.push(segmentPath)
       } else if (isInsideParallelSlot) {
         // For now, we ignore parallel routes for purposes of finding configs to validate
         // and finding shared layout parents.
@@ -640,8 +641,12 @@ export async function createValidationRouteTree(
         }
 
         if (modType === 'layout') {
+          // All layouts will be checked as navigation parents, so
+          // if a layout has a prefetch config, we'll check navigations into it
+          // because we'll be navigating from its parents.
+
           // TODO(prefetch-validation): technically we should only validate *shared* layouts,
-          // but we have no way of knowing that here
+          // but we have no way of knowing that here.
           navigationParents.push(segmentPath)
         } else if (modType === 'page') {
           if (parentPath === null) {
@@ -671,10 +676,12 @@ export async function createValidationRouteTree(
       }
     }
 
+    const parentLayoutPathForChildren =
+      modType === 'layout' ? segmentPath : parentLayoutPath
+
     let slots: ValidationRouteTree['slots'] = null
     for (const parallelRouteKey in parallelRoutes) {
       const childLoaderTree = parallelRoutes[parallelRouteKey]
-      const isChildInsideRootLayout = isInsideRootLayout || isRootLayout
       const isChildInParallelSlot =
         isInsideParallelSlot || parallelRouteKey !== 'children'
       slots ??= {}
@@ -682,7 +689,7 @@ export async function createValidationRouteTree(
         childLoaderTree,
         segmentPath,
         parallelRouteKey,
-        isChildInsideRootLayout,
+        parentLayoutPathForChildren,
         isChildInParallelSlot
       )
     }
@@ -697,7 +704,7 @@ export async function createValidationRouteTree(
     return treeNode
   }
 
-  const routeTree = await visit(rootLoaderTree, null, null, false, false)
+  const routeTree = await visit(rootLoaderTree, null, null, null, false)
   return {
     tree: routeTree,
     treeNodes,

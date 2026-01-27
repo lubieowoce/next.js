@@ -6,5 +6,9 @@ export function DebugLinkMPA({
   href,
   ...props
 }: Omit<ComponentProps<'a'>, 'children'>) {
-  return <a href={href}>{href}</a>
+  return (
+    <a href={href} {...props}>
+      {href}
+    </a>
+  )
 }

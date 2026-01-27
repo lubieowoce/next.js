@@ -6,11 +6,13 @@ export const unstable_prefetch = { mode: 'static' }
 export default function Page() {
   return (
     <Suspense fallback={<div>Loading...</div>}>
-      <p>
-        The page blocks on dynamic content, but shows a fallback, so it's
-        instant
-      </p>
-      <Dynamic />
+      <main>
+        <p>
+          The page blocks on dynamic content, but shows a fallback, so it's
+          instant
+        </p>
+        <Dynamic />
+      </main>
     </Suspense>
   )
 }

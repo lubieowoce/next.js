@@ -6,7 +6,7 @@ export default async function Page() {
   await cookies()
   return (
     <main>
-      <p>This page blocks when navigating from the parent layout</p>
+      <p>This page blocks when navigating inside the parent layout</p>
     </main>
   )
 }
