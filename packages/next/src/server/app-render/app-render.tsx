@@ -136,7 +136,7 @@ import {
   trackDynamicHoleInRuntimeShell,
   trackDynamicHoleInStaticShell,
   getStaticShellDisallowedDynamicReasons,
-  getPrefetchDisallowedDynamicReasons,
+  getNavigationDisallowedDynamicReasons,
   trackDynamicHoleInNavigation,
   DynamicHoleKind,
 } from './dynamic-rendering'
@@ -4418,7 +4418,7 @@ async function validatePrefetchConfig(
       )
 
     const { preludeIsEmpty } = await processPrelude(unprocessedPrelude)
-    const reasons = getPrefetchDisallowedDynamicReasons(
+    const reasons = getNavigationDisallowedDynamicReasons(
       workStore,
       preludeIsEmpty ? PreludeState.Empty : PreludeState.Full,
       dynamicValidation
@@ -4427,7 +4427,7 @@ async function validatePrefetchConfig(
   } catch (thrownValue) {
     // Even if the root errors we still want to report any cache components errors
     // that were discovered before the root errored.
-    let errors: Array<unknown> = getPrefetchDisallowedDynamicReasons(
+    let errors: Array<unknown> = getNavigationDisallowedDynamicReasons(
       workStore,
       PreludeState.Errored,
       dynamicValidation

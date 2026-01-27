@@ -1133,7 +1133,7 @@ export function getStaticShellDisallowedDynamicReasons(
   return []
 }
 
-export function getPrefetchDisallowedDynamicReasons(
+export function getNavigationDisallowedDynamicReasons(
   workStore: WorkStore,
   prelude: PreludeState,
   dynamicValidation: DynamicValidationState
