@@ -1,4 +1,4 @@
-import { DebugLinkMPA } from '../components/debug-link'
+import { DebugLinkMPA } from '../../components/debug-link'
 import { cacheLife } from 'next/cache'
 
 export default async function Page() {

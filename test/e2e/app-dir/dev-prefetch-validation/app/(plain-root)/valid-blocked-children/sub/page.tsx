@@ -7,8 +7,8 @@ export default function Page() {
   return (
     <Suspense fallback={<div>Loading...</div>}>
       <p>
-        The page blocks on dynamic content, but shows a fallback, so it's still
-        instant when navigating from <code>/nested/*</code>
+        The page blocks on dynamic content, but shows a fallback, so it's
+        instant
       </p>
       <Dynamic />
     </Suspense>
